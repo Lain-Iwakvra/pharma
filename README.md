@@ -173,12 +173,25 @@ et `.pharma.json` n'est créé que par une association **explicite**
 (*Associer à une molécule…*).
 
 Un document appartient à la molécule de son **dossier ancêtre le plus proche**
-(sous la racine) : c'est lui qui fournit le résumé affiché à droite. Seuls
-comptent les dossiers qui **ressemblent** à une molécule — `.pharma.json` ou
-fichier `resume.*` : un dossier générique (« notes », « etudes », « 2024 »…)
-n'est jamais deviné être une molécule, le volet reste alors sur le message
-d'association. Le lien peut être rendu explicite : clic droit sur un dossier →
-*Associer à une molécule…*.
+(sous la racine) : c'est lui qui fournit le résumé affiché à droite. Les
+ancêtres sont examinés **du plus proche au plus loin** et le premier « signe
+de molécule » gagne — `.pharma.json` d'abord, puis fichier `resume.*`. Seuls
+comptent les dossiers qui **ressemblent** à une molécule : un dossier générique
+(« notes », « etudes », « 2024 »…) n'est jamais deviné être une molécule, le
+volet reste alors sur le message d'association.
+
+**La racine du répertoire de travail n'est jamais une molécule**, même si elle
+porte un `.pharma.json` ou un `resume.*` : sans cette règle, une association
+posée sur la racine (par erreur) faisait croire que **tout** le travail
+appartient à une seule molécule — le résumé restait bloqué sur elle partout,
+et les inventaires (vues groupées, comparaison) en créaient un doublon. Le
+menu contextuel de la racine n'offre donc ni *Associer à une molécule…* ni
+*Régénérer le résumé* ; en sélectionner un élément ne change pas le volet
+résumé.
+
+Le lien entre un dossier et une molécule est rendu explicite : clic droit sur
+un dossier → *Associer à une molécule…* ; **laisser le champ vide retire
+l'association existante**.
 
 Le titre du volet résumé affiche le **nom déclaré dans `resume.json`** quand il
 diffère du nom de dossier, avec la mention `— dossier « … »` ; l'infobulle

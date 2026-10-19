@@ -237,7 +237,8 @@ class ChooseMoleculeDialog(QDialog):
         layout = QFormLayout(self)
         layout.addRow(QLabel(
             "Le dossier sera relié à cette molécule : son résumé s'affichera\n"
-            "dans le volet de droite quand un PDF y sera ouvert."
+            "dans le volet de droite quand un PDF y sera ouvert.\n"
+            "Laisser le champ vide pour retirer l'association existante."
         ))
         self.field = QLineEdit(current, self)
         self.field.setPlaceholderText("ex. : LSD, MDMA, 3-MMC…")
@@ -943,16 +944,23 @@ class WorkspacePane(QWidget):
 
     def _context_menu(self, point) -> None:
         index = self.tree.indexAt(point)
+        menu = self._build_context_menu(self._path_of(index))
+        menu.exec(self.tree.viewport().mapToGlobal(point))
+
+    def _build_context_menu(self, path) -> QMenu:
+        """Menu contextuel pour `path` (None = zone vide), sans l'afficher.
+
+        La construction est séparée de `exec` : les tests peuvent inspecter
+        les entrées sans déclencher de boucle d'événements modale.
+        """
         menu = QMenu(self)
-        path = self._path_of(index)
         if path is None:
             menu.addAction("Créer un sous-dossier…", lambda: self.requestNewSubdir.emit(
                 self.root
             ))
             menu.addSeparator()
             menu.addMenu(self._build_add_menu())
-            menu.exec(self.tree.viewport().mapToGlobal(point))
-            return
+            return menu
 
         is_dir = path.is_dir()
 
@@ -962,15 +970,19 @@ class WorkspacePane(QWidget):
             ))
             menu.addMenu(self._build_add_menu())
             menu.addSeparator()
-            menu.addAction(
-                "Associer à une molécule…",
-                lambda: self.requestAssociate.emit(path),
-            )
-            menu.addAction(
-                "Régénérer le résumé",
-                lambda: self.requestRefreshResume.emit(path),
-            )
-            menu.addSeparator()
+            if not sb.is_workspace_root(path, self.root):
+                # la racine n'est jamais une molecule : ni association, ni
+                # regeneration (elles alimentaient un resume a la racine
+                # qui revendiquait tout le travail).
+                menu.addAction(
+                    "Associer à une molécule…",
+                    lambda: self.requestAssociate.emit(path),
+                )
+                menu.addAction(
+                    "Régénérer le résumé",
+                    lambda: self.requestRefreshResume.emit(path),
+                )
+                menu.addSeparator()
             menu.addAction(
                 "Ajouter à la comparaison",
                 lambda: self.requestCompare.emit(path),
@@ -987,10 +999,11 @@ class WorkspacePane(QWidget):
                 lambda: self.pathActivated.emit(path),
             )
             menu.addSeparator()
-            menu.addAction(
-                "Associer ce dossier à une molécule…",
-                lambda: self.requestAssociate.emit(path.parent),
-            )
+            if not sb.is_workspace_root(path.parent, self.root):
+                menu.addAction(
+                    "Associer ce dossier à une molécule…",
+                    lambda: self.requestAssociate.emit(path.parent),
+                )
             menu.addAction(
                 "Ajouter à la comparaison",
                 lambda: self.requestCompare.emit(path),
@@ -1009,7 +1022,7 @@ class WorkspacePane(QWidget):
             "Placer dans la corbeille",
             lambda: self.requestDelete.emit(path),
         )
-        menu.exec(self.tree.viewport().mapToGlobal(point))
+        return menu
 
     def requestOpen(self, path: Path) -> None:
         """Ouvre un document : dans le lecteur si Qt sait l'afficher, sinon
@@ -2906,12 +2919,37 @@ class MainWindow(QMainWindow):
         if not self._require_workspace():
             return
         directory = Path(directory)
+        if sb.is_workspace_root(directory, self.root):
+            # la racine n'est jamais une molecule : un `.pharma.json` ici
+            # capturait tous les documents du travail au profit d'une seule
+            # molecule (resume affiche « partout »).
+            self.statusBar().showMessage(
+                "La racine du répertoire de travail n'est pas une molécule : "
+                "associez un de ses sous-dossiers.",
+                5000,
+            )
+            return
         current = sb.read_molecule_meta(directory)
         dialog = ChooseMoleculeDialog(self, current)
         if dialog.exec() != QDialog.Accepted:
             return
         molecule = dialog.molecule()
         if not molecule:
+            if not current:
+                return
+            # champ vide sur un dossier deja associe : on retire l'association
+            # (seule facon de sortir d'une association erronee depuis l'UI)
+            try:
+                sb.clear_molecule_meta(directory)
+            except OSError as exc:
+                QMessageBox.warning(self, "Écriture impossible", str(exc))
+                return
+            self.workspace.reload()
+            self.statusBar().showMessage(
+                f"L'association de « {directory.name} » a été retirée.",
+                5000,
+            )
+            self._sync_summary_from_current_tab()
             return
         try:
             sb.write_molecule_meta(directory, molecule)
@@ -3119,6 +3157,10 @@ class MainWindow(QMainWindow):
             return
         path = Path(path)
         if path.is_dir():
+            if sb.is_workspace_root(path, self.root):
+                # la racine n'est jamais une molecule : la selectionner ne
+                # doit pas afficher le resume qui traîne a la racine
+                return
             declared = sb.read_molecule_meta(path)
             if declared or sb.has_resume(path):
                 molecule = declared or path.name
@@ -3418,7 +3460,7 @@ class MainWindow(QMainWindow):
         if not self._require_workspace():
             return
         path = Path(path)
-        if path.is_dir() and path != self.root:
+        if path.is_dir() and not sb.is_workspace_root(path, self.root):
             # un dossier : sa propre metadonnee / son resume, sinon son nom
             # (locate_molecule ne descend que depuis un fichier)
             name = sb.read_molecule_meta(path) or path.name
@@ -3734,7 +3776,7 @@ class MainWindow(QMainWindow):
         if not self._require_workspace():
             return
         path = Path(path)
-        if path.is_dir() and path != self.root:
+        if path.is_dir() and not sb.is_workspace_root(path, self.root):
             name = sb.read_molecule_meta(path) or path.name
         else:
             _directory, name = sb.locate_molecule(path, self.root)

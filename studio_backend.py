@@ -166,6 +166,18 @@ def write_molecule_meta(directory: Path, molecule: str) -> None:
     )
 
 
+def clear_molecule_meta(directory: Path) -> None:
+    """Retire l'association explicite d'un dossier (supprime `.pharma.json`).
+
+    N'echoue pas si le fichier n'existe pas deja.
+    """
+    meta = Path(directory) / MOLECULE_META
+    try:
+        meta.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def ancestor_dirs(path: Path, root: Path) -> list[Path]:
     """Dossiers ancetres de `path` sous `root`, du plus proche au plus loin."""
     root = Path(root).resolve()
@@ -179,29 +191,46 @@ def ancestor_dirs(path: Path, root: Path) -> list[Path]:
     return out
 
 
+def is_workspace_root(path: Path, root: Optional[Path]) -> bool:
+    """Vrai si `path` designe la racine du repertoire de travail.
+
+    La racine n'est **jamais** une molecule : cette question revient partout
+    ou un chemin choisi par l'utilisateur pourrait la designer (selection,
+    menu contextuel, association). Chemins resoles pour ne pas confondre un
+    dossier et un lien symbolique qui y mene.
+    """
+    if root is None or path is None:
+        return False
+    try:
+        return Path(path).resolve() == Path(root).resolve()
+    except OSError:
+        return Path(path) == Path(root)
+
+
 def locate_molecule(path: Path, root: Path) -> tuple[Optional[Path], str]:
     """Dossier de molecule et nom associes a un document : (dir, molecule).
 
-    Deux tentatives, dans l'ordre :
-    1. metadonnee explicite `.pharma.json` d'un dossier ancetre ;
-    2. dossier ancetre le plus proche contenant un resume du parser.
+    Les dossiers ancetres sont examines **du plus proche au plus loin** et le
+    premier signe de molecule gagne, dans l'ordre pour un dossier donne :
+    1. metadonnee explicite `.pharma.json` ;
+    2. resume du parser (`resume.json`, `resume.html` ou `resume.md`).
 
-    Aucun repli sur le nom d'un dossier arbitraire : un dossier generique
-    (« etudes », « 2024 »…) ne doit jamais etre pris pour une molecule —
-    la meme regle que pour la generation automatique des resumes. Sinon
-    (None, "").
+    La racine du repertoire de travail est exclue : meme porteur d'un
+    `.pharma.json` ou d'un resume, elle n'est jamais une molecule — sinon une
+    association posee sur la racine ferait croire que **tout** le travail
+    appartient a une seule molecule (tous les documents s'y resolvaient).
+
+    Un dossier generique sans aucun signe (« etudes », « 2024 »…) n'est pas
+    devine molecule non plus. Sinon (None, "").
     """
     root = Path(root).resolve()
-    dirs = ancestor_dirs(path, root)
 
-    for directory in dirs:
+    for directory in ancestor_dirs(path, root):
+        if directory == root:
+            continue
         declared = read_molecule_meta(directory)
         if declared:
             return directory, declared
-
-    for directory in dirs:
-        if directory == root:
-            continue
         if (directory / RESUME_JSON).is_file() or (
             directory / RESUME_HTML
         ).is_file() or (directory / RESUME_MD).is_file():
@@ -233,6 +262,11 @@ def molecule_catalogue(root: Path) -> list[dict]:
         if RESUME_JSON not in filenames:
             continue
         directory = Path(dirpath)
+        if directory == root:
+            # la racine n'est jamais une molecule (voir locate_molecule) :
+            # son resume ne doit pas fabriquer de fausse entree dans ces
+            # inventaires (doublon, dossier = racine, donnee perimee).
+            continue
         try:
             data = json.loads(
                 (directory / RESUME_JSON).read_text(encoding="utf-8")
@@ -310,6 +344,11 @@ def comparison_rows(root: Path) -> list[dict]:
         if RESUME_JSON not in filenames:
             continue
         directory = Path(dirpath)
+        if directory == root:
+            # la racine n'est jamais une molecule (voir locate_molecule) :
+            # son resume ne doit pas fabriquer de fausse entree dans ces
+            # inventaires (doublon, dossier = racine, donnee perimee).
+            continue
         try:
             data = json.loads(
                 (directory / RESUME_JSON).read_text(encoding="utf-8")
@@ -368,6 +407,10 @@ def find_molecule_dir(root: Path, name: str) -> Optional[Path]:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         directory = Path(dirpath)
+        if directory == root:
+            # la racine n'est jamais une molecule : son resume ou son
+            # association ne doivent pas capter une recherche de dossier.
+            continue
         candidates: list[str] = []
         if RESUME_JSON in filenames:
             try:
