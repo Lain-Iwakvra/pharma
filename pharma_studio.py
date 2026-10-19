@@ -4579,10 +4579,22 @@ class MainWindow(QMainWindow):
             widget.focus_search()
 
     # -- calendrier des prises -------------------------------------------
+    def _calendar_path(self) -> Path:
+        """Fichier du journal : dans le répertoire de travail.
+
+        Le journal vit à la racine du travail (`calendrier.json`), pour
+        voyager avec les molécules ; le fichier global
+        (`~/.local/share/pharma/calendrier.json`) n'est qu'un repli quand
+        aucun répertoire n'est ouvert.
+        """
+        if self.root is not None:
+            return Path(self.root) / "calendrier.json"
+        return sb.calendar_path()
+
     def _calendar_items(self) -> list[dict]:
         """Journal des prises (lu une fois, puis garde en memoire)."""
         if self._calendar_entries is None:
-            self._calendar_entries = sb.load_calendar()
+            self._calendar_entries = sb.load_calendar(self._calendar_path())
         return self._calendar_entries
 
     def _calendar_suggestions(self) -> list[str]:
@@ -4614,12 +4626,23 @@ class MainWindow(QMainWindow):
 
     def _calendar_activate(self) -> None:
         """Recharge le journal depuis le disque a l'ouverture de la page."""
-        self._calendar_entries = sb.load_calendar()
+        path = self._calendar_path()
+        entries = sb.load_calendar(path)
+        if not entries and not path.is_file():
+            # premier passage : récupérer l'ancien journal global, pour ne
+            # pas perdre les prises saisies avant que le journal ne vive
+            # dans le répertoire de travail.
+            legacy = sb.calendar_path()
+            if legacy != path and legacy.is_file():
+                entries = sb.load_calendar(legacy)
+                if entries:
+                    sb.save_calendar(entries, path)
+        self._calendar_entries = entries
         self._calendar_refresh_view()
 
     def _calendar_store(self) -> None:
         """Ecrit le journal sur le disque et met la vue a jour."""
-        sb.save_calendar(self._calendar_items())
+        sb.save_calendar(self._calendar_items(), self._calendar_path())
         self._calendar_refresh_view()
 
     def _calendar_add_dialog(self, prefill=None) -> None:
@@ -4702,7 +4725,7 @@ class MainWindow(QMainWindow):
     def _calendar_save_file(self) -> None:
         """Enregistre une copie du journal des prises dans un fichier choisi."""
         path, _filter = QFileDialog.getSaveFileName(
-            self, "Enregistrer le calendrier", "calendrier.json",
+            self, "Enregistrer le calendrier", str(self._calendar_path()),
             "Fichier JSON (*.json)",
         )
         if not path:
@@ -4716,8 +4739,10 @@ class MainWindow(QMainWindow):
 
     def _calendar_load_file(self) -> None:
         """Remplace le journal par celui d'un fichier choisi (avec accord)."""
+        start_dir = (str(self.root) if self.root is not None
+                     else str(Path.home()))
         path, _filter = QFileDialog.getOpenFileName(
-            self, "Charger un calendrier", str(Path.home()),
+            self, "Charger un calendrier", start_dir,
             "Fichier JSON (*.json)",
         )
         if not path:

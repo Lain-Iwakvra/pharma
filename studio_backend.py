@@ -644,7 +644,11 @@ _UNIT_FACTOR = dict(_DURATION_UNITS)
 
 
 def calendar_path() -> Path:
-    """Fichier du journal des prises (~/.local/share/pharma/calendrier.json)."""
+    """Journal des prises global (~/.local/share/pharma/calendrier.json).
+
+    Chemin de repli, utilisé seulement hors répertoire de travail ; quand un
+    répertoire est ouvert, le journal vit dans celui-ci (`calendrier.json`).
+    """
     base = os.environ.get("XDG_DATA_HOME") or ""
     root = Path(base) if base else Path.home() / ".local" / "share"
     return root / "pharma" / "calendrier.json"

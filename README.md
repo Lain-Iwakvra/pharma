@@ -504,11 +504,12 @@ après chaque prise.
   dans les vues Année et Mois (le fond n'est qu'un pâle rappel de la phase
   dominante : ce sont les lignes qui portent l'information) ; la vue Jour
   reprend la suite de la ligne avec le sous-titre *suite*.
-* Le journal est un fichier JSON versionné
-  (`$XDG_DATA_HOME/pharma/calendrier.json`, soit
-  `~/.local/share/pharma/calendrier.json`), indépendant du répertoire de
-  travail, lisible et éditable à la main. Le bouton *Actualiser* relit le
-  fichier et les durées documentées.
+* Le journal est un fichier JSON versionné `calendrier.json`, écrit **à la
+  racine du répertoire de travail** (il accompagne donc les molécules) ;
+  lisible et éditable à la main. Tant qu'aucun répertoire n'est ouvert, le
+  fichier global `~/.local/share/pharma/calendrier.json` sert de repli, et il
+  est repris automatiquement la première fois qu'un journal de travail est
+  créé. Le bouton *Actualiser* relit le fichier et les durées documentées.
 * **Enregistrer / Charger / Effacer** : le menu *Fichier* propose
   « Enregistrer le calendrier… » (`Ctrl+Alt+S`), « Charger un calendrier… »
   (`Ctrl+Alt+O`) et « Effacer le calendrier… » ; les mêmes actions sont dans
