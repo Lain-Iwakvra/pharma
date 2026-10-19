@@ -276,6 +276,100 @@ class ChooseMoleculeDialog(QDialog):
         return self.field.text().strip()
 
 
+class SynonymsDialog(QDialog):
+    """Éditeur de la table d'alias DDInter (nom saisi -> nom DDInter).
+
+    Le fichier `synonyms.json` vit dans le dossier de cache ; il sert au
+    rapprochement des noms lors du croisement d'interactions (page
+    Interactions). Aucun accès réseau.
+    """
+
+    def __init__(self, parent, mapping=None):
+        super().__init__(parent)
+        self.setWindowTitle("Éditeur de synonymes (DDInter)")
+        self.resize(620, 460)
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Rapproche un nom saisi (à gauche) du nom utilisé par la base "
+            "DDInter (à droite) : « Caféine » → « caffeine ». Sert au "
+            "croisement d'interactions. Laisser une ligne vide l'ignore.",
+            self,
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.table = QTableWidget(self)
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Nom saisi", "Nom DDInter"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        layout.addWidget(self.table, 1)
+
+        actions = QHBoxLayout()
+        add = QPushButton("Ajouter une ligne", self)
+        add.clicked.connect(self._add_row)
+        actions.addWidget(add)
+        remove = QPushButton("Retirer la ligne", self)
+        remove.clicked.connect(self._remove_row)
+        actions.addWidget(remove)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._fill(mapping or {})
+
+    def _fill(self, mapping) -> None:
+        items = sorted(mapping.items(), key=lambda kv: str(kv[0]).casefold())
+        self.table.setRowCount(len(items))
+        for row, (key, value) in enumerate(items):
+            self.table.setItem(row, 0, QTableWidgetItem(str(key)))
+            self.table.setItem(row, 1, QTableWidgetItem(str(value)))
+        self._add_row()
+
+    def _add_row(self) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(""))
+        self.table.setItem(row, 1, QTableWidgetItem(""))
+        self.table.setCurrentCell(row, 0)
+        self.table.editItem(self.table.item(row, 0))
+
+    def _remove_row(self) -> None:
+        rows = sorted(
+            {index.row() for index in self.table.selectedIndexes()},
+            reverse=True,
+        )
+        if not rows and self.table.rowCount():
+            rows = [self.table.rowCount() - 1]
+        for row in rows:
+            self.table.removeRow(row)
+
+    def mapping(self) -> dict:
+        out: dict[str, str] = {}
+        for row in range(self.table.rowCount()):
+            left = self.table.item(row, 0)
+            right = self.table.item(row, 1)
+            key = left.text().strip() if left else ""
+            value = right.text().strip() if right else ""
+            if key and value:
+                out[key] = value
+        return out
+
+    @staticmethod
+    def edit(parent, mapping=None) -> dict | None:
+        dialog = SynonymsDialog(parent, mapping)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return dialog.mapping()
+        return None
+
+
 class BookSearchDialog(QDialog):
     """Recherche bibliographique multi-sources, puis import du PDF en accès libre.
 
@@ -2143,6 +2237,7 @@ class InteractionsPane(QWidget):
     useCompareRequested = Signal()
     pathDropped = Signal(object)
     wikidataToggled = Signal(bool)
+    synonymsRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2207,6 +2302,13 @@ class InteractionsPane(QWidget):
         )
         base.triggered.connect(self.downloadBaseRequested)
         bar.addAction(base)
+        synonyms = QAction("Éditeur de synonymes…", self)
+        synonyms.setToolTip(
+            "Modifie la table d'alias utilisée pour rapprocher les noms de "
+            "la base DDInter (fichier synonyms.json du cache)."
+        )
+        synonyms.triggered.connect(lambda: self.synonymsRequested.emit())
+        bar.addAction(synonyms)
         self.wikidata_action = QAction("Wikidata", self, checkable=True)
         self.wikidata_action.setToolTip(
             "Ajoute les interactions documentées dans Wikidata (propriété "
@@ -4459,6 +4561,7 @@ class MainWindow(QMainWindow):
         self.interactions.useCompareRequested.connect(
             self._interactions_use_compare
         )
+        self.interactions.synonymsRequested.connect(self._edit_synonyms)
         self.interactions.pathDropped.connect(self._interactions_add_from_tree)
         self.interactions.wikidataToggled.connect(
             self._interactions_wikidata_toggled
@@ -4525,6 +4628,8 @@ class MainWindow(QMainWindow):
         open_action.setShortcut(QKeySequence.Open)
         open_action.triggered.connect(self.choose_workspace)
         file_menu.addAction(open_action)
+        self.recent_menu = file_menu.addMenu("Répertoires récents")
+        self._rebuild_recent_menu()
         file_menu.addSeparator()
         save_tables = QAction("Enregistrer les tableaux…", self)
         save_tables.setShortcut("Ctrl+Shift+S")
@@ -4591,6 +4696,15 @@ class MainWindow(QMainWindow):
         )
         search_menu.addAction(mol_action)
 
+        data_menu = self.menuBar().addMenu("&Données")
+        edit_syn = QAction("Éditeur de synonymes (DDInter)…", self)
+        edit_syn.setToolTip(
+            "Modifie la table d'alias qui rapproche les noms saisis des noms "
+            "de la base DDInter."
+        )
+        edit_syn.triggered.connect(self._edit_synonyms)
+        data_menu.addAction(edit_syn)
+
         view_menu = self.menuBar().addMenu("&Affichage")
         self.toggle_left = QAction("Explorateur", self, checkable=True, checked=True)
         self.toggle_left.toggled.connect(
@@ -4631,6 +4745,26 @@ class MainWindow(QMainWindow):
     def _about(self) -> None:
         QMessageBox.information(self, f"À propos de {APP_NAME}", DISCLAIMER)
 
+    def _edit_synonyms(self) -> None:
+        """Ouvre l'éditeur de la table d'alias DDInter (synonyms.json)."""
+        mapping = sb.load_synonyms()
+        result = SynonymsDialog.edit(self, mapping)
+        if result is None:
+            return
+        try:
+            path = sb.save_synonyms(result)
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Éditeur de synonymes",
+                f"Enregistrement impossible : {exc}",
+            )
+            return
+        self.statusBar().showMessage(
+            f"{len(result)} synonyme(s) enregistré(s) — {path}", 6000
+        )
+        if self.interactions.names():
+            self._interactions_refresh()
+
     def _connect_workspace(self) -> None:
         ws = self.workspace
         ws.documentActivated.connect(self.open_document)
@@ -4656,6 +4790,55 @@ class MainWindow(QMainWindow):
         self.summary.refreshRequested.connect(self.refresh_resume)
 
     # -- repertoire de travail -------------------------------------------
+    MAX_RECENT = 10
+
+    def _recent_workspaces(self) -> list[str]:
+        """Chemins des répertoires de travail récents (le plus récent d'abord)."""
+        value = self.settings.value("recent_workspaces", [])
+        if isinstance(value, str):
+            value = [value]
+        out: list[str] = []
+        for item in value or []:
+            text = str(item).strip()
+            if text and text not in out:
+                out.append(text)
+        return out[: self.MAX_RECENT]
+
+    def _rebuild_recent_menu(self) -> None:
+        menu = getattr(self, "recent_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        recents = self._recent_workspaces()
+        if not recents:
+            empty = menu.addAction("(aucun répertoire récent)")
+            empty.setEnabled(False)
+            return
+        current = str(getattr(self, "root", None) or "")
+        for path in recents:
+            action = menu.addAction(("• " if path == current else "  ") + path)
+            action.setToolTip(path)
+            action.triggered.connect(
+                lambda checked=False, p=path: self.set_workspace(Path(p))
+            )
+        menu.addSeparator()
+        menu.addAction("Ouvrir un répertoire…").triggered.connect(
+            self.choose_workspace
+        )
+        menu.addAction("Effacer la liste").triggered.connect(self._clear_recent)
+
+    def _clear_recent(self) -> None:
+        self.settings.remove("recent_workspaces")
+        self._rebuild_recent_menu()
+
+    def _remember_workspace(self, root: Path) -> None:
+        """Place `root` en tête des répertoires récents et rafraîchit le menu."""
+        path = str(Path(root))
+        recents = [item for item in self._recent_workspaces() if item != path]
+        recents.insert(0, path)
+        self.settings.setValue("recent_workspaces", recents[: self.MAX_RECENT])
+        self._rebuild_recent_menu()
+
     def choose_workspace(self) -> None:
         start = str(self.root) if self.root else str(Path.home())
         directory = QFileDialog.getExistingDirectory(
@@ -4676,6 +4859,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} — {root}")
         self.workspace.set_root(root)
         self.settings.setValue("workspace", str(root))
+        self._remember_workspace(root)
         self._remove_welcome()
         self.summary.clear()
         self._restore_session()

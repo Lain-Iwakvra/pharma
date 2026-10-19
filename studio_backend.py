@@ -3337,6 +3337,27 @@ def load_synonyms(cache_dir: Path | None = None) -> dict:
     return {str(k): str(v) for k, v in data.items() if str(v).strip()}
 
 
+def save_synonyms(mapping: dict | None, cache_dir: Path | None = None) -> Path:
+    """Ecrit la table d'alias utilisateur (nom courant -> nom DDInter).
+
+    Les entrees dont le nom DDInter est vide sont ecartees. Le fichier est
+    cree s'il n'existe pas ; il sert au rapprochement DDInter (page
+    Interactions).
+    """
+    path = synonyms_path(cache_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        str(key).strip(): str(value).strip()
+        for key, value in (mapping or {}).items()
+        if str(key).strip() and str(value).strip()
+    }
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return path
+
+
 # -- interactions PsychonautWiki locales ---------------------------------------
 def workspace_interactions(root: Path) -> dict[str, str]:
     """{molecule: texte des interactions} lu dans les resume.json du travail."""
@@ -3545,6 +3566,76 @@ def molecule_traits(name: str, classes=None) -> set[str]:
     return traits
 
 
+# Libelles francais des traits pharmacologiques (pour la detection de classes).
+TRAIT_LABELS: dict[str, str] = {
+    "opioid": "opioïdes",
+    "opioid_antagonist": "antagonistes opioïdes",
+    "gabaergic": "GABAergiques (benzodiazépines, barbituriques…)",
+    "depressant": "dépresseurs du SNC",
+    "antihistamine": "antihistaminiques",
+    "stimulant": "stimulants",
+    "sympathomimetic": "sympathomimétiques",
+    "serotonergic": "sérotoninergiques (ISRS, IRSN…)",
+    "serotonin_releaser": "libérateurs de sérotonine",
+    "maoi": "IMAO",
+    "psychedelic": "psychédéliques",
+    "dissociative": "dissociatifs",
+    "antipsychotic": "antipsychotiques",
+    "dopamine_agonist": "agonistes dopaminergiques",
+    "cyp_inhibitor": "inhibiteurs du CYP",
+    "cyp_inducer": "inducteurs du CYP",
+    "qt": "allongement du QT",
+    "hepatotoxic": "hépatotoxiques",
+    "nephrotoxic": "néphrotoxiques",
+    "anticholinergic": "anticholinergiques",
+    "antiplatelet": "antiplaquettaires",
+    "anticoagulant": "anticoagulants",
+    "nsaid": "AINS",
+    "serotonergic_depletor": "dépéteurs sérotoninergiques",
+}
+
+
+def _class_pattern(label: str, plural: bool = True):
+    """Motif « mot entier » (pluriel tolere) d'une classe, ou None."""
+    folded = _norm_name(label)
+    if len(folded) < 3:
+        return None
+    escaped = re.escape(folded)
+    tail = r"s?" if plural else r""
+    return re.compile(rf"(?<![0-9a-z]){escaped}{tail}(?![0-9a-z])")
+
+
+def class_mention(text: str, name: str, classes=None) -> str:
+    """Classe pharmacologique de `name` citee dans `text`, ou "".
+
+    Ameliore le rapprochement PsychonautWiki : les resumes citent souvent des
+    classes entieres (« MAOIs », « SSRIs », « benzodiazepines ») plutot que le
+    nom exact de la molecule. On cherche donc les classes connues du resume
+    puis les traits pharmacologiques deduits du nom et des classes.
+    """
+    if not text:
+        return ""
+    normalized = _norm_name(text)
+    # 1. classes explicites du resume (ex. « SSRI », « opioid »)
+    classes = [str(value) for value in (classes or []) if str(value).strip()]
+    for value in classes:
+        pattern = _class_pattern(value)
+        if pattern and pattern.search(normalized):
+            return TRAIT_LABELS.get(_norm_name(value), str(value))
+    # 2. traits deduits (nom + classes) : on retient le libelle le plus long
+    best = ""
+    for trait in molecule_traits(name, classes):
+        label = TRAIT_LABELS.get(trait, trait)
+        if len(label) <= len(best):
+            continue
+        for keyword in _TRAIT_KEYWORDS.get(trait, ()):
+            pattern = _class_pattern(keyword)
+            if pattern and pattern.search(normalized):
+                best = label
+                break
+    return best
+
+
 def _mechanism_key(a: str, b: str) -> str:
     ka, kb = _pair_key(a, b)
     return f"{ka}+{kb}"
@@ -3733,6 +3824,17 @@ def build_interaction_pairs(entries, ddinter: dict | None = None,
                 if text and _mentions(text, dst["name"]):
                     found[f"PsychonautWiki ({src['name']})"] = _snippet(
                         text, dst["name"])
+                elif text:
+                    # PsychonautWiki cite souvent la classe plutot que le nom :
+                    # « MAOIs », « SSRIs », « benzodiazepines »…
+                    phrase = class_mention(
+                        text, dst["name"],
+                        (classes or {}).get(_norm_name(dst["name"])),
+                    )
+                    if phrase:
+                        found[
+                            f"PsychonautWiki ({src['name']} — classe)"
+                        ] = (f"classe « {phrase} » citée par « {src['name']} »")
             key = _pair_key(na, nb)
             if key in wd_pairs:
                 found["Wikidata"] = str(wd_pairs[key] or "")
