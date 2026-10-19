@@ -341,7 +341,9 @@ La fenêtre comporte trois onglets permanents en haut :
   sont pas affichés en colonnes. Pour chaque cellule, la valeur fusionnée
   `pharmacology` est lue en premier, puis les champs bruts PsychonautWiki,
   puis l'infobox Wikipedia (utile quand un `resume.json` a été généré sans
-  section `pharmacology`) ;
+  section `pharmacology`). Pour la **demi-vie**, une valeur fusionnée qui ne
+  commence pas par une durée (phrase citant le métabolite) est remplacée par
+  la ligne d'infobox, plus structurée ;
 * **Interactions** — le croisement des interactions entre plusieurs
   molécules (voir plus bas).
 
@@ -547,8 +549,15 @@ relative** d'une molécule après une prise, à partir de sa dose et de son
   La biodisponibilité chiffrée, quand elle existe, met la courbe à l'échelle.
 * **Repères** : la **verticale pointillée** marque le Tmax et l'unique
   **point creux** la demi-vie (`t½`) ; l'axe horizontal est le temps depuis la
-  prise en heures, l'axe vertical une **concentration relative** en unités
-  arbitraires (`u.a.`). La durée tracée est de **5 demi-vies**.
+  prise en heures — **en jours au-delà de deux jours** (demi-vies longues,
+  par ex. la fluoxétine) — et l'axe vertical une **concentration relative** en
+  unités arbitraires (`u.a.`). La durée tracée est de **5 demi-vies**.
+* **Demi-vie** : lue dans le champ fusionné `pharmacology.halflife`. Quand
+  celui-ci **ne commence pas par une durée** — extraction ayant glissé le
+  chiffre du métabolite (« norfluoxetine is longer (16 days)… ») — la ligne
+  « Elimination half-life » de l'infobox Wikipédia, structurée, fait foi. Le
+  panneau affiche la plage documentée, la valeur **médiane retenue pour le
+  modèle** et le **texte source** (« 1–3 days (acute) 4–6 days (chronic) »).
 * Le volume de distribution n'étant pas documenté, l'échelle verticale reste
   **relative** : elle est proportionnelle à la dose saisie pour une **même**
   molécule, mais **n'est pas comparable entre molécules**.

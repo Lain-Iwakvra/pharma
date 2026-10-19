@@ -448,6 +448,10 @@ def comparison_rows(root: Path) -> list[dict]:
                 value = _flatten_value(raw)
             if not value:  # dernier repli : infobox Wikipedia du resume
                 value = _wiki_value(wiki_values, key)
+            elif key == "halflife" and not _starts_with_duration(value):
+                # phrase de Wikipedia citant le metabolite plutot que la
+                # molecule : la ligne d'infobox, plus structuree, fait foi
+                value = _wiki_value(wiki_values, key) or value
             if value:
                 fields[key] = value
         out.append({
@@ -643,6 +647,48 @@ _LEAD_DURATION_RE = re.compile(
 )
 _UNIT_FACTOR = dict(_DURATION_UNITS)
 
+# Valeurs d'infobox : la duree peut etre separee de son unite par un encadre
+# (« 8.7 (range 4.6-16) hours »). On lit le premier nombre et on ignore
+# l'encadre, ce que ne fait pas `parse_lead_duration`.
+_INFOBOX_DURATION_RE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(?:[-–—]\s*(\d+(?:[.,]\d+)?)\s*)?"
+    r"(?:\([^)]{0,60}\)\s*)?"
+    r"(secondes|seconde|seconds|second|secs|sec|minutes|minute|mins|min|"
+    r"heures|heure|hours|hour|hrs|hr|jours|jour|days|day|h|d|s)\b"
+)
+
+
+def _starts_with_duration(text) -> bool:
+    """Vrai si le texte commence par « nombre [plage] unite ».
+
+    Distingue une valeur documentee (« 175 minutes », « 1–3 days ») d'une
+    phrase de Wikipedia ou l'extraction a glisse le chiffre du metabolite
+    (« norfluoxetine is longer (16 days)… »), qui ne doit pas faire foi.
+    """
+    raw = str(text or "").strip().lower()
+    return bool(raw) and _LEAD_DURATION_RE.match(raw) is not None
+
+
+def parse_infobox_duration(text) -> Optional[tuple[float, float]]:
+    """Premiere duree d'une valeur d'infobox, en minutes ; None si illisible.
+
+    Plus tolerant que `parse_lead_duration` : un encadre peut separer la
+    valeur de son unite (« 8.7 (range 4.6-16) hours »).
+    """
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return None
+    match = _INFOBOX_DURATION_RE.search(raw)
+    if match is None:
+        return None
+    unit = _UNIT_FACTOR.get(match.group(3))
+    if unit is None:
+        return None
+    low = float(match.group(1).replace(",", ".")) * unit
+    raw_high = match.group(2)
+    high = float(raw_high.replace(",", ".")) * unit if raw_high else low
+    return (min(low, high), max(low, high))
+
 
 def calendar_path() -> Path:
     """Journal des prises global (~/.local/share/pharma/calendrier.json).
@@ -716,6 +762,53 @@ def _pharmacology_text(pharm: dict, key: str) -> str:
     return ""
 
 
+def _load_resume(molecule_dir: Optional[Path]) -> dict:
+    """`resume.json` d'un dossier molecule, ou {} s'il est absent/illisible."""
+    if not molecule_dir:
+        return {}
+    try:
+        data = json.loads(
+            (Path(molecule_dir) / RESUME_JSON).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _halflife_choice(pharm: dict, data: dict
+                     ) -> tuple[Optional[tuple[float, float]], str]:
+    """(plage en minutes, texte source) de la demi-vie documentee.
+
+    Le champ fusionne `pharmacology.halflife` fait foi quand il *commence* par
+    la duree. Sinon — phrase de Wikipedia ou l'extraction a glisse le chiffre
+    du metabolite — on retombe sur la ligne « half-life » de l'infobox
+    Wikipedia, structuree ; a defaut, la phrase est relue telle quelle.
+    """
+    text = _pharmacology_text(pharm, "halflife")
+    if _starts_with_duration(text):
+        return parse_lead_duration(text), text
+    wiki = _wiki_value(_wiki_infobox_values(data), "halflife")
+    value = parse_infobox_duration(wiki) if wiki else None
+    if value:
+        return value, wiki
+    return parse_lead_duration(text), text
+
+
+def halflife_document(molecule_dir: Optional[Path]) -> dict:
+    """Demi-vie documentee d'une molecule : plage (minutes) et texte source.
+
+    Renvoie {"range": (min, max) | None, "text": texte d'origine}. `text`
+    permet d'afficher la valeur telle que documentee, par exemple
+    « 1–3 days (acute) 4–6 days (chronic) ».
+    """
+    data = _load_resume(molecule_dir)
+    pharm = data.get("pharmacology")
+    if not isinstance(pharm, dict):
+        pharm = {}
+    value, text = _halflife_choice(pharm, data)
+    return {"range": value, "text": text}
+
+
 def molecule_timeline(molecule_dir: Optional[Path]) -> dict:
     """Durees d'action documentees d'une molecule, en minutes.
 
@@ -733,13 +826,8 @@ def molecule_timeline(molecule_dir: Optional[Path]) -> dict:
     }
     if not molecule_dir:
         return timeline
-    try:
-        data = json.loads(
-            (Path(molecule_dir) / RESUME_JSON).read_text(encoding="utf-8")
-        )
-    except (OSError, ValueError):
-        return timeline
-    if not isinstance(data, dict):
+    data = _load_resume(molecule_dir)
+    if not data:
         return timeline
     pharm = data.get("pharmacology")
     if not isinstance(pharm, dict):
@@ -749,11 +837,10 @@ def molecule_timeline(molecule_dir: Optional[Path]) -> dict:
     timeline["total"] = parse_duration_minutes(
         _pharmacology_text(pharm, "duration")
     )
-    # une phrase de Wikipedia peut commencer par la valeur puis citer d'autres
-    # chiffres (dose, temps jusqu'au pic) : lecture stricte du debut de phrase
-    timeline["halflife"] = parse_lead_duration(
-        _pharmacology_text(pharm, "halflife")
-    )
+    # la demi-vie fusionnee est parfois une phrase citant le metabolite : on
+    # prefere alors la valeur structuree de l'infobox Wikipedia (voir
+    # `_halflife_choice`)
+    timeline["halflife"] = _halflife_choice(pharm, data)[0]
     if timeline["total"] is None:
         parts = [timeline[k] for k in ("onset", "comeup", "peak", "offset")
                  if timeline[k]]
@@ -1032,8 +1119,10 @@ def pharmacokinetic_report(molecule_dir: Optional[Path] = None, dose: str = "",
             "parameters": {}, "times": [], "values": [], "dose_mg": dose_mg,
         }
     times, values = pk_curve(params, dose_mg=dose_mg)
+    document = halflife_document(molecule_dir)
     return {"ok": True, "message": "", "times": times, "values": values,
-            "dose_mg": dose_mg, "parameters": params}
+            "dose_mg": dose_mg, "parameters": params,
+            "half_life_text": document.get("text") or ""}
 
 
 def normalise_entry(entry: dict) -> dict:

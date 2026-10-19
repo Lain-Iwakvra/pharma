@@ -2528,6 +2528,24 @@ def _fmt_duree(minutes) -> str:
     return f"{minutes:.0f} min"
 
 
+def _fmt_duree_longue(minutes) -> str:
+    """Comme `_fmt_duree`, mais en jours au-dela de 24 h : « 2.5 j ».
+
+    Les demi-vies longues (fluoxetine : 1–3 jours) restent lisibles dans le
+    panneau pharmacocinetique.
+    """
+    try:
+        minutes = float(minutes or 0)
+    except (TypeError, ValueError):
+        return "?"
+    if not minutes:
+        return "?"
+    if minutes >= 1440:
+        text = f"{minutes / 1440.0:.1f}".rstrip("0").rstrip(".")
+        return f"{text} j"
+    return _fmt_duree(minutes)
+
+
 def _fmt_date_longue(iso: str) -> str:
     """« 2026-05-12T21:30 » -> « mardi 12 mai 2026 à 21:30 »."""
     try:
@@ -3729,13 +3747,18 @@ class CalendarPane(QWidget):
 PK_COLORS = ("#2e6db4", "#c0392b", "#27865a", "#8e44ad", "#d68910",
              "#17a2b8", "#7f8c8d")
 
+# Pas d'axe des temps : heures par defaut, jours au-dela de deux jours
+# (demi-vies longues, p. ex. la fluoxetine).
+_STEPS_HEURES = (0.5, 1, 2, 3, 6, 12, 24, 48, 72, 168)
+_STEPS_JOURS = (0.5, 1, 2, 3, 5, 7, 15, 30, 60)
 
-def _nice_step(value: float) -> float:
-    """Pas « rond » en heures, au moins egal a `value`."""
-    for step in (0.5, 1, 2, 3, 6, 12, 24, 48, 72, 168):
+
+def _nice_step(value: float, steps=_STEPS_HEURES) -> float:
+    """Pas « rond » (heures ou jours selon `steps`), au moins egal a `value`."""
+    for step in steps:
         if value <= step:
             return float(step)
-    return 168.0
+    return float(steps[-1])
 
 
 def _nice_number(value: float) -> float:
@@ -3815,22 +3838,29 @@ class PkChart(QWidget):
         y_max = max(max(s["values"]) for s in series) or 1.0
         y_max *= 1.06
 
+        # au-dela de deux jours, l'axe des temps passe en jours : les
+        # demi-vies longues (fluoxetine) restent lisibles
+        jours = x_max > 48.0
+        diviseur = 24.0 if jours else 1.0
+
         def xpix(hours: float) -> float:
             return rect.left() + rect.width() * hours / x_max
 
         def ypix(value: float) -> float:
             return rect.bottom() - rect.height() * value / y_max
 
-        step_x = _nice_step(x_max / 8.0)
-        hour = 0.0
-        while hour <= x_max + 1e-9:
-            x = xpix(hour)
+        step_x = _nice_step(x_max / diviseur / 8.0,
+                            _STEPS_JOURS if jours else _STEPS_HEURES)
+        marque = 0.0
+        while marque * diviseur <= x_max + 1e-9:
+            x = xpix(marque * diviseur)
             painter.setPen(QPen(QColor("#e4e4e4")))
             painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
             painter.setPen(QPen(QColor("#666666")))
+            libelle = (f"{marque:g} j" if jours else _fmt_heures(marque))
             painter.drawText(QRectF(x - 26, rect.bottom() + 2, 52, 18),
-                             Qt.AlignmentFlag.AlignCenter, _fmt_heures(hour))
-            hour += step_x
+                             Qt.AlignmentFlag.AlignCenter, libelle)
+            marque += step_x
         step_y = _nice_number(y_max / 4.0)
         value = 0.0
         while value <= y_max + 1e-9:
@@ -3847,7 +3877,8 @@ class PkChart(QWidget):
         painter.drawText(QRectF(rect.left(), rect.bottom() + 22,
                                 rect.width(), 18),
                          Qt.AlignmentFlag.AlignHCenter,
-                         "Temps depuis la prise (heures)")
+                         "Temps depuis la prise (jours)" if jours
+                         else "Temps depuis la prise (heures)")
         painter.save()
         painter.translate(12, rect.center().y())
         painter.rotate(-90)
@@ -4020,6 +4051,8 @@ class PharmacoPane(QWidget):
             "times": report["times"], "values": report["values"],
             "color": PK_COLORS[len(self.series) % len(PK_COLORS)],
             "half_life_min": report["parameters"]["half_life_min"],
+            "half_life_range": report["parameters"].get("half_life_range"),
+            "half_life_text": report.get("half_life_text") or "",
             "tmax_min": report["parameters"]["tmax_min"],
             "parameters": report["parameters"],
             "dose_mg": report.get("dose_mg"), "start": start,
@@ -4116,7 +4149,21 @@ class PharmacoPane(QWidget):
             lines.append("Dose non notée — courbe normalisée")
         half = serie.get("half_life_min")
         if half:
-            lines.append(f"Demi-vie documentée : {_fmt_duree(half)}")
+            plage = serie.get("half_life_range")
+            if plage and len(plage) == 2 and plage[0] != plage[1]:
+                lines.append(
+                    "Demi-vie documentée : "
+                    f"{_fmt_duree_longue(plage[0])} – "
+                    f"{_fmt_duree_longue(plage[1])} "
+                    f"({_fmt_duree_longue(half)} retenu pour le modèle)"
+                )
+            else:
+                lines.append(f"Demi-vie documentée : {_fmt_duree_longue(half)}")
+            source = str(serie.get("half_life_text") or "").strip()
+            if source:
+                if len(source) > 160:
+                    source = source[:157] + "…"
+                lines.append(f"Valeur source (demi-vie) : {esc(source)}")
         tmax = serie.get("tmax_min")
         if tmax:
             lines.append(f"Tmax retenu : {_fmt_duree(tmax)} "
@@ -4131,7 +4178,7 @@ class PharmacoPane(QWidget):
             lines.append(f"Biodisponibilité : {bio * 100:.0f} %")
         times = serie.get("times") or []
         if times:
-            lines.append(f"Durée tracée : {_fmt_duree(times[-1])} "
+            lines.append(f"Durée tracée : {_fmt_duree_longue(times[-1])} "
                          f"({sb.PK_HALF_LIVES} demi-vies)")
         start = serie.get("start")
         if start:
