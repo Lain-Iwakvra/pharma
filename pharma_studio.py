@@ -1966,11 +1966,35 @@ class ComparePane(QWidget):
         return names
 
 
+def split_molecule_names(text: str) -> list[str]:
+    """Découpe une saisie en noms de molécules séparés par « ; ».
+
+    Les retours à la ligne sont aussi acceptés comme séparateurs ; les noms
+    vides sont ignorés et l'ordre de saisie est conservé, sans doublon
+    (comparaison insensible aux accents et à la casse). La virgule n'est
+    jamais un séparateur : certains noms en contiennent (« 1,4-butanediol »).
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for part in str(text or "").replace("\r", "\n").split("\n"):
+        for chunk in part.split(";"):
+            name = chunk.strip()
+            if not name:
+                continue
+            key = rm.fold_accents(name).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+    return names
+
+
 class MoleculeInputDialog(QDialog):
-    """Saisie d'un nom de molecule, avec autocompletion locale."""
+    """Saisie d'un ou plusieurs noms de molecules, avec autocompletion locale."""
 
     def __init__(self, parent, suggestions, title="Ajouter une molécule",
-                 label="Nom de la molécule (français ou anglais) :"):
+                 label="Noms des molécules (français ou anglais), "
+                       "séparés par « ; » :"):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(460)
@@ -1978,6 +2002,9 @@ class MoleculeInputDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(label, self))
         self.edit = QLineEdit(self)
+        self.edit.setPlaceholderText(
+            "Ex. : LSD ; morphine ; caféine"
+        )
         known = sorted({str(s).strip() for s in (suggestions or [])
                         if str(s).strip()}, key=str.casefold)
         completion = QCompleter(known, self)
@@ -1995,16 +2022,17 @@ class MoleculeInputDialog(QDialog):
         self.edit.returnPressed.connect(self.accept)
         layout.addWidget(buttons)
 
-    def molecule(self) -> str:
-        return self.edit.text().strip()
+    def molecules(self) -> list[str]:
+        """Liste des noms saisis (plusieurs noms séparés par « ; »)."""
+        return split_molecule_names(self.edit.text())
 
     @staticmethod
-    def ask(parent, suggestions) -> str:
-        """Retourne le nom saisi, ou "" si l'utilisateur annule."""
+    def ask(parent, suggestions) -> list[str]:
+        """Retourne les noms saisis, ou [] si l'utilisateur annule."""
         dialog = MoleculeInputDialog(parent, suggestions)
         if dialog.exec() == QDialog.Accepted:
-            return dialog.molecule()
-        return ""
+            return dialog.molecules()
+        return []
 
 
 # --- page interactions : croisement de plusieurs molecules -------------------
@@ -3699,6 +3727,7 @@ class MainWindow(QMainWindow):
         # page « Comparaison » : le meme explorateur (deplace d'une page a
         # l'autre) + un tableau comparatif qui remplace lecteur et resume.
         self._compare_queue: list[dict] = []
+        self._add_queue: list[tuple[Path, str, bool]] = []
         self._compare_items_cache: list[dict] | None = None
         self._research_sizes: list[int] = []
         self.compare = ComparePane(self)
@@ -4017,7 +4046,7 @@ class MainWindow(QMainWindow):
         choice = ChooseTitleDialog.ask(self, exc)
         if not choice:
             self.statusBar().showMessage("Opération annulée.", 6000)
-            self._compare_pump()
+            self._pump_queues()
             return
         task.choices[exc.source] = choice
         self._start_task(task)
@@ -4033,7 +4062,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Opération impossible", message)
         if task.on_fail is not None:
             task.on_fail(message)
-        self._compare_pump()
+        self._pump_queues()
 
     def _on_finished(self, task: Task, result) -> None:
         self._end_task()
@@ -4044,6 +4073,11 @@ class MainWindow(QMainWindow):
                 task.on_done(result)
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(self, "Erreur d'affichage", str(exc))
+        self._pump_queues()
+
+    def _pump_queues(self) -> None:
+        """Relance les files d'attente (ajouts de dossiers, comparaison)."""
+        self._add_pump()
         self._compare_pump()
 
     # -- actions de l'explorateur ----------------------------------------
@@ -4163,23 +4197,49 @@ class MainWindow(QMainWindow):
     def add_molecule(self, directory: Path) -> None:
         if not self._require_workspace():
             return
-        molecule, ok = QInputDialog.getText(
-            self,
-            "Ajouter une molécule",
-            "Nom de la molécule (français ou anglais) :",
-        )
-        if not ok or not molecule.strip():
+        names = MoleculeInputDialog.ask(self, self._molecule_suggestions())
+        if not names:
             return
-        molecule = molecule.strip()
         target_dir = Path(directory)
+        # un seul nom : on ouvre le document obtenu comme avant ; plusieurs
+        # noms : on enchaîne la création des dossiers sans ouvrir de fenêtre.
+        for molecule in names:
+            self._add_queue.append((target_dir, molecule, len(names) == 1))
+        self._add_pump()
+
+    def _molecule_suggestions(self) -> list[str]:
+        """Noms des molécules présentes dans le répertoire de travail."""
+        if self.root is None:
+            return []
+        return sorted({str(e.get("name", "")).strip()
+                       for e in sb.comparison_rows(self.root)
+                       if str(e.get("name", "")).strip()}, key=str.casefold)
+
+    def _add_pump(self) -> None:
+        """Lance la prochaine création de dossier si aucune tâche ne tourne."""
+        if self._task is not None or not self._add_queue or self.root is None:
+            return
+        target_dir, molecule, auto_open = self._add_queue.pop(0)
 
         def done(result):
             if result.get("pdf"):
-                self.open_document(Path(result["pdf"]))
-            elif result.get("pw_pdf"):
-                self.open_document(Path(result["pw_pdf"]))
-            else:
-                self.summary.show_molecule(result["dir"], molecule)
+                if auto_open:
+                    self.open_document(Path(result["pdf"]))
+                else:
+                    self.statusBar().showMessage(
+                        f"« {molecule} » ajoutée (PDF Wikipédia).", 6000
+                    )
+                return
+            if result.get("pw_pdf"):
+                if auto_open:
+                    self.open_document(Path(result["pw_pdf"]))
+                else:
+                    self.statusBar().showMessage(
+                        f"« {molecule} » ajoutée (PDF PsychonautWiki).", 6000
+                    )
+                return
+            self.summary.show_molecule(result["dir"], molecule)
+            if auto_open:
                 QMessageBox.information(
                     self,
                     "Molécule ajoutée",
@@ -4187,6 +4247,10 @@ class MainWindow(QMainWindow):
                     "mais le PDF Wikipédia n'a pas pu être téléchargé.\n"
                     "Vous pouvez l'ajouter plus tard avec « Ajouter le PDF "
                     "d'une page Wikipédia… ».",
+                )
+            else:
+                self.statusBar().showMessage(
+                    f"« {molecule} » ajoutée, sans PDF téléchargeable.", 8000
                 )
 
         self._start_task(Task(
@@ -4957,15 +5021,23 @@ class MainWindow(QMainWindow):
             self._compare_pump()
 
     def _compare_add_dialog(self) -> None:
-        """Bouton « Ajouter une molécule… » de la page Comparaison."""
+        """Bouton « Ajouter une molécule… » de la page Comparaison.
+
+        Plusieurs noms peuvent être saisis, séparés par « ; ».
+        """
         if not self._require_workspace():
             return
-        name, ok = QInputDialog.getText(
-            self, "Ajouter une molécule",
-            "Nom de la molécule (français ou anglais) :",
-        )
-        if ok and name.strip():
-            self._compare_add(name.strip())
+        for name in MoleculeInputDialog.ask(self, self._compare_suggestions()):
+            self._compare_add(name)
+
+    def _compare_suggestions(self) -> list[str]:
+        """Noms connus pour l'autocompletion : tableau + répertoire."""
+        names = [str(row.get("name", "")) for row in self.compare.rows]
+        if self.root is not None:
+            names += [str(entry.get("name", ""))
+                      for entry in sb.comparison_rows(self.root)]
+        return sorted({name.strip() for name in names if name.strip()},
+                      key=str.casefold)
 
     def _compare_add_from_tree(self, path) -> None:
         """Clic droit « Ajouter à la comparaison » : resout la molecule."""
@@ -5279,8 +5351,8 @@ class MainWindow(QMainWindow):
     def _interactions_add_dialog(self) -> None:
         if not self._require_workspace():
             return
-        name = MoleculeInputDialog.ask(self, self._interactions_suggestions())
-        if name:
+        for name in MoleculeInputDialog.ask(
+                self, self._interactions_suggestions()):
             self._interactions_add(name)
 
     def _interactions_add_from_tree(self, path) -> None:

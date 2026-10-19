@@ -229,7 +229,7 @@ le clic droit :
 | Action | Effet |
 |--------|-------|
 | **Créer un sous-dossier…** | nouveau dossier libre |
-| **Ajouter une molécule…** | crée `<Molécule>/` avec le PDF Wikipédia, le PDF PsychonautWiki (rendu à partir de la page déjà récupérée, avec figures intégrées) et `resume.html` / `resume.json` |
+| **Ajouter une molécule…** | crée `<Molécule>/` avec le PDF Wikipédia, le PDF PsychonautWiki (rendu à partir de la page déjà récupérée, avec figures intégrées) et `resume.html` / `resume.json` ; plusieurs noms peuvent être saisis d'un coup, séparés par `;` (créés l'un après l'autre) |
 | **Ajouter le PDF d'une page Wikipédia…** | télécharge le PDF de la page dont vous donnez le titre |
 | **Ajouter le PDF d'une page PsychonautWiki…** | récupère la page PsychonautWiki et la rend en PDF dans le dossier choisi (figures intégrées, feuille de style d'impression) |
 | **Ajouter un document existant…** | importe un document du disque (PDF, texte, image, HTML, EPUB) |
@@ -350,10 +350,10 @@ Recherche** (le lecteur n'existe que sur cette page) ; à la fermeture, la
 page Recherche est également rétablie avant de mémoriser la disposition
 des volets.
 
-* **Ajouts** : « Ajouter une molécule… » dans la barre d'outils de la page,
-  ou clic droit dans l'explorateur → « Ajouter à la comparaison » (le
-  dossier de la molécule est résolu automatiquement, insensible à la casse
-  et aux accents).
+* **Ajouts** : « Ajouter une molécule… » dans la barre d'outils de la page
+  (plusieurs noms acceptés d'un coup, séparés par `;`), ou clic droit dans
+  l'explorateur → « Ajouter à la comparaison » (le dossier de la molécule
+  est résolu automatiquement, insensible à la casse et aux accents).
 * **États par ligne** : *en file*, *téléchargement…*, *disponible*,
   *échec*, *absente*. Un double-clic sur une ligne ouvre son
   `resume.html` (et bascule sur Recherche).
@@ -412,7 +412,8 @@ Trois sources, du plus local au plus distant :
 Fonctionnement :
 
 * **Liste des molécules** à gauche : ajout par « Ajouter une molécule… »
-  (autocomplétion sur les molécules du répertoire et sur la base DDInter),
+  (autocomplétion sur les molécules du répertoire et sur la base DDInter ;
+  plusieurs noms acceptés d'un coup, séparés par `;`),
   par **glisser depuis l'explorateur** (dossier ou fichier, résolu
   automatiquement), ou par clic droit dans l'explorateur → « Ajouter aux
   interactions ». Les dépôts venus d'autres applications sont ignorés.
