@@ -2436,10 +2436,6 @@ PHASE_RANKS = {
     "latence": 1, "montée": 2, "durée indiquée": 2, "durée documentée": 2,
     "descente": 3, "plateau": 4,
 }
-PHASE_SYMBOL = {
-    "latence": "◌", "montée": "↗", "plateau": "●", "descente": "↘",
-    "durée indiquée": "•", "durée documentée": "•",
-}
 
 
 def _fmt_heure(moment: datetime) -> str:
@@ -2483,66 +2479,124 @@ class ClickableFrame(QFrame):
 
 
 class DayTimeline(QWidget):
-    """Frise 0 h - 24 h d'une journee : un bloc colore par phase d'effet.
+    """Frise 0 h - 24 h : une ligne par prise, les phases en segments.
 
-    Les blocs d'une prise qui deborde de la journee (prise de la veille,
-    effet qui passe minuit) sont tronques au cadre.
+    Le temps court de gauche a droite. Chaque prise occupe sa propre ligne :
+    les lignes sont donc paralleles, ce qui permet de comparer plusieurs
+    molecules le meme jour. Une phase d'effet est un segment colore de la
+    ligne (latence, montee, plateau, descente) ; la prise est marquee d'un
+    point plein, la demi-vie documentee d'un point creux (t½, puis ses
+    multiples). Les prises qui debordent de la journee sont tronquees au
+    cadre.
     """
 
-    HOUR_HEIGHT = 30
-    LEFT = 48
+    ROW_HEIGHT = 40
+    HEADER = 26
+    GUTTER = 150
+    LINE_WIDTH = 6
+    HOUR_WIDTH = 28
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.day = QDate.currentDate()
-        # (phase, debut, fin, molecule) en datetime local
-        self.blocks: list[tuple[str, datetime, datetime, str]] = []
-        self.setMinimumWidth(330)
-        self.setMinimumHeight(self.HOUR_HEIGHT * 25)
+        # une « voie » par prise : {label, sub, start, segments, halflives}
+        self.lanes: list[dict] = []
+        self.setMinimumWidth(self.GUTTER + 24 * self.HOUR_WIDTH)
+        self._resize_height()
 
-    def set_day_blocks(self, day: QDate, blocks) -> None:
+    def set_day_lanes(self, day: QDate, lanes) -> None:
         self.day = QDate(day)
-        self.blocks = list(blocks)
+        self.lanes = list(lanes or [])
+        self._resize_height()
         self.update()
 
-    def _y(self, moment: datetime) -> float:
+    def _resize_height(self) -> None:
+        rows = max(1, len(self.lanes))
+        self.setMinimumHeight(self.HEADER + rows * self.ROW_HEIGHT + 8)
+
+    def _plot(self) -> tuple[float, float]:
+        left = float(self.GUTTER)
+        right = float(max(self.GUTTER + 1, self.width() - 10))
+        return left, right
+
+    def _x(self, moment: datetime) -> float:
         start = datetime(self.day.year(), self.day.month(), self.day.day())
         minutes = (moment - start).total_seconds() / 60.0
-        return minutes / 60.0 * self.HOUR_HEIGHT
+        left, right = self._plot()
+        return left + minutes / 1440.0 * (right - left)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#ffffff"))
-        font = QFont(painter.font())
-        font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
-        painter.setFont(font)
-        total_height = self.HOUR_HEIGHT * 24
+        base_font = QFont(painter.font())
+        base_font.setPointSizeF(max(7.0, base_font.pointSizeF() - 1.0))
+        painter.setFont(base_font)
+        left, right = self._plot()
+        rows = max(1, len(self.lanes))
+        top = float(self.HEADER)
+        bottom = top + rows * self.ROW_HEIGHT
         for hour in range(25):
-            y = hour * self.HOUR_HEIGHT
-            painter.setPen(QPen(QColor("#e6e6e6" if hour % 2 else "#c8c8c8")))
-            painter.drawLine(self.LEFT, int(y), self.width() - 6, int(y))
-            if hour < 24:
+            x = left + (right - left) * hour / 24.0
+            painter.setPen(QPen(QColor("#c8c8c8" if hour % 3 == 0
+                                      else "#ededed")))
+            painter.drawLine(int(x), int(top), int(x), int(bottom))
+            if hour % 3 == 0:
                 painter.setPen(QPen(QColor("#666666")))
-                painter.drawText(4, int(y) + self.HOUR_HEIGHT // 2 + 4,
-                                 f"{hour:02d}:00")
-        painter.setPen(QPen(QColor("#c8c8c8")))
-        painter.drawLine(self.LEFT, 0, self.LEFT, total_height)
-        for phase, begin, end, molecule in self.blocks:
-            y1 = max(0.0, self._y(begin))
-            y2 = min(float(total_height), self._y(end))
-            if y2 - y1 < 1.5:
-                y2 = y1 + 1.5
-            rect = QRectF(self.LEFT + 2, y1,
-                          self.width() - self.LEFT - 10, y2 - y1)
-            painter.fillRect(rect, QColor(PHASE_COLORS.get(phase, "#cccccc")))
-            if rect.height() >= 13:
-                painter.setPen(QPen(QColor("#333333")))
-                text = (f"{PHASE_SYMBOL.get(phase, '•')} {phase} "
-                        f"{_fmt_heure(begin)}–{_fmt_heure(end)}")
-                if rect.height() >= 28 and molecule:
-                    text += f" — {molecule}"
-                painter.drawText(rect.adjusted(4, 0, -4, 0),
-                                 Qt.AlignVCenter | Qt.AlignLeft, text)
+                painter.drawText(QRectF(x - 20, 1, 40, self.HEADER - 3),
+                                 Qt.AlignCenter, f"{hour} h")
+        painter.setPen(QPen(QColor("#d0d0d0")))
+        painter.drawLine(int(left), int(top), int(right), int(top))
+        metrics = painter.fontMetrics()
+        bold = QFont(base_font)
+        bold.setBold(True)
+        for index, lane in enumerate(self.lanes):
+            y = top + index * self.ROW_HEIGHT + self.ROW_HEIGHT / 2.0
+            painter.setFont(bold)
+            painter.setPen(QPen(QColor("#333333")))
+            label = metrics.elidedText(str(lane.get("label") or ""),
+                                       Qt.ElideRight, int(left) - 30)
+            painter.drawText(QRectF(6, y - 17, left - 26, 16),
+                             Qt.AlignLeft | Qt.AlignVCenter, label)
+            painter.setFont(base_font)
+            painter.setPen(QPen(QColor("#888888")))
+            sub = metrics.elidedText(str(lane.get("sub") or ""),
+                                     Qt.ElideRight, int(left) - 26)
+            painter.drawText(QRectF(6, y + 1, left - 26, 15),
+                             Qt.AlignLeft | Qt.AlignVCenter, sub)
+            # phases : segments de la ligne de cette prise
+            for phase, begin, end in lane.get("segments") or []:
+                x1 = max(left, self._x(begin))
+                x2 = min(right, self._x(end))
+                if x2 - x1 < 1.0:
+                    continue
+                pen = QPen(QColor(PHASE_COLORS.get(phase, "#cccccc")),
+                           self.LINE_WIDTH)
+                pen.setCapStyle(Qt.RoundCap)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(x1, y), QPointF(x2, y))
+            # point de prise
+            start = lane.get("start")
+            if start is not None:
+                x = self._x(start)
+                if left - 2 <= x <= right + 2:
+                    painter.setPen(QPen(QColor("#333333")))
+                    painter.setBrush(QBrush(QColor("#333333")))
+                    painter.drawEllipse(QPointF(x, y), 4.0, 4.0)
+                    painter.setBrush(Qt.NoBrush)
+            # demi-vie et ses multiples : points creux
+            for k, moment in lane.get("halflives") or []:
+                x = self._x(moment)
+                if not (left - 2 <= x <= right + 2):
+                    continue
+                painter.setPen(QPen(QColor("#444444"), 1.4))
+                painter.setBrush(QBrush(QColor("#ffffff")))
+                painter.drawEllipse(QPointF(x, y), 4.0 if k == 1 else 3.0,
+                                    4.0 if k == 1 else 3.0)
+                painter.setBrush(Qt.NoBrush)
+                if k == 1:
+                    painter.setPen(QPen(QColor("#444444")))
+                    painter.drawText(QRectF(x - 22, y - 21, 44, 13),
+                                     Qt.AlignCenter, "t½")
         painter.end()
 
 
@@ -2805,15 +2859,36 @@ class CalendarPane(QWidget):
     def _day_color(self, day: QDate) -> str:
         return self._day_colors.get(day.toPython(), "")
 
-    def _blocks_of_day(self, day: QDate) -> list:
+    def _lanes_of_day(self, day: QDate) -> list[dict]:
+        """Une « ligne » par prise touchant ce jour (les lignes sont paralleles).
+
+        Les prises de la veille dont l'effet court encore sont incluses : leur
+        sous-titre indique « suite » et leur segment est tronque au cadre.
+        """
         begin_day = datetime(day.year(), day.month(), day.day())
         end_day = begin_day + timedelta(days=1)
-        out = []
+        lanes = []
         for entry, start, segments in self._computed:
-            for phase, begin, finish in segments:
-                if begin < end_day and finish > begin_day:
-                    out.append((phase, begin, finish, entry["molecule"]))
-        return out
+            overlaps = any(begin < end_day and finish > begin_day
+                           for _, begin, finish in segments)
+            starts_today = begin_day <= start < end_day
+            if not overlaps and not starts_today:
+                continue
+            timeline = self.timelines.get(self.molecule_key(entry["molecule"]))
+            sub = _fmt_heure(start) if start >= begin_day else "suite"
+            if entry["dose"]:
+                sub += f" · {entry['dose']}"
+            if not segments:
+                sub += " · durée inconnue"
+            lanes.append({
+                "label": entry["molecule"],
+                "sub": sub,
+                "start": start,
+                "segments": segments,
+                "halflives": sb.halflife_points(start, timeline),
+            })
+        lanes.sort(key=lambda lane: lane["start"])
+        return lanes
 
     def _entries_of_day(self, day: QDate) -> list[dict]:
         key = day.toPython()
@@ -2921,6 +2996,9 @@ class CalendarPane(QWidget):
             label = QLabel(f"■ {phase}", box)
             label.setStyleSheet(f"color:{PHASE_COLORS[phase]}; font-size:11px;")
             layout.addWidget(label)
+        point = QLabel("● prise   ◯ demi-vie (t½)", box)
+        point.setStyleSheet("color:#444; font-size:11px;")
+        layout.addWidget(point)
         note = QLabel("effet estimé (durées documentées)", box)
         note.setStyleSheet("color:#888; font-size:11px;")
         layout.addWidget(note)
@@ -3076,7 +3154,7 @@ class CalendarPane(QWidget):
         layout.addWidget(self._legend())
         row = QHBoxLayout()
         timeline = DayTimeline(box)
-        timeline.set_day_blocks(day, self._blocks_of_day(day))
+        timeline.set_day_lanes(day, self._lanes_of_day(day))
         row.addWidget(timeline, 0)
         side = QVBoxLayout()
         side.addWidget(QLabel("Prises du jour", box))
@@ -3113,7 +3191,11 @@ class CalendarPane(QWidget):
             text += f" — {entry['dose']}"
         timeline = self.timelines.get(self.molecule_key(entry["molecule"]))
         total = entry["duree_min"] or sb.influence_end_minutes(timeline)
-        return f"{text}   ({_fmt_duree(total)} sous influence)"
+        text += f"   ({_fmt_duree(total)} sous influence"
+        half = (timeline or {}).get("halflife")
+        if half:
+            text += f", t½ {_fmt_duree(half[0])}"
+        return text + ")"
 
     def _entry_tooltip(self, entry: dict) -> str:
         start = self._parse_start(entry)
@@ -3133,6 +3215,12 @@ class CalendarPane(QWidget):
                 )
         else:
             lines.append("Durées documentées indisponibles pour cette molécule.")
+        half = (timeline or {}).get("halflife")
+        if half:
+            value = (f"{_fmt_duree(half[0])}" if half[0] == half[1]
+                     else f"{_fmt_duree(half[0])}–{_fmt_duree(half[1])}")
+            lines.append(f"Demi-vie documentée : {value} "
+                         f"(points creux : t½, 2 t½, 3 t½…)")
         lines.append("Estimation à partir des durées documentées — pas une "
                      "donnée médicale.")
         return "\n".join(lines)

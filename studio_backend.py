@@ -38,7 +38,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 from html import escape as esc_html
 from pathlib import Path
 from typing import Callable, Optional
@@ -632,6 +632,16 @@ _DURATION_UNITS: tuple[tuple[str, float], ...] = (
 
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
+# Premier « nombre [a-b] unite » du texte : sert a la demi-vie, dont les
+# phrases de Wikipedia commencent souvent par la valeur (« 8 hours and a time
+# to peak of about 1 to 2 hours ») puis citent d'autres chiffres.
+_LEAD_DURATION_RE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(?:[-–—]\s*(\d+(?:[.,]\d+)?))?\s*"
+    r"(secondes|seconde|seconds|second|secs|sec|minutes|minute|mins|min|"
+    r"heures|heure|hours|hour|hrs|hr|jours|jour|days|day|h|d|s)\b"
+)
+_UNIT_FACTOR = dict(_DURATION_UNITS)
+
 
 def calendar_path() -> Path:
     """Fichier du journal des prises (~/.local/share/pharma/calendrier.json)."""
@@ -665,6 +675,29 @@ def parse_duration_minutes(text) -> Optional[tuple[float, float]]:
     return (min(numbers) * unit, max(numbers) * unit)
 
 
+def parse_lead_duration(text) -> Optional[tuple[float, float]]:
+    """Premiere duree citee dans un texte, en minutes ; None si illisible.
+
+    Contrairement a `parse_duration_minutes`, seuls la valeur et l'unite qui
+    se suivent sont lues : les phrases de Wikipedia (« 8 hours and a time to
+    peak of about 1 to 2 hours ») citent d'autres chiffres apres la valeur.
+    Utilise pour la demi-vie.
+    """
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return None
+    match = _LEAD_DURATION_RE.search(raw)
+    if match is None:
+        return None
+    unit = _UNIT_FACTOR.get(match.group(3))
+    if unit is None:
+        return None
+    low = float(match.group(1).replace(",", ".")) * unit
+    raw_high = match.group(2)
+    high = float(raw_high.replace(",", ".")) * unit if raw_high else low
+    return (min(low, high), max(low, high))
+
+
 def _pharmacology_text(pharm: dict, key: str) -> str:
     entry = pharm.get(key)
     if isinstance(entry, dict):
@@ -683,15 +716,15 @@ def molecule_timeline(molecule_dir: Optional[Path]) -> dict:
 
     Lit `pharmacology` du `resume.json` et renvoie les phases de la plus
     fiable a la moins directe : « onset » (temps d'apparition), « comeup »
-    (montee), « peak » (plateau), « offset » (descente) et « total » (duree
-    d'action du resume si presente, sinon somme des phases lues). Chaque
-    valeur est une plage (min, max) en minutes, ou None. Sert a estimer la
-    periode sous influence dans le calendrier ; ce n'est pas une donnee
-    medicale.
+    (montee), « peak » (plateau), « offset » (descente), « total » (duree
+    d'action du resume si presente, sinon somme des phases lues) et
+    « halflife » (demi-vie documentee). Chaque valeur est une plage (min, max)
+    en minutes, ou None. Sert a estimer la periode sous influence dans le
+    calendrier ; ce n'est pas une donnee medicale.
     """
     timeline: dict[str, Optional[tuple[float, float]]] = {
         "onset": None, "comeup": None, "peak": None, "offset": None,
-        "total": None,
+        "total": None, "halflife": None,
     }
     if not molecule_dir:
         return timeline
@@ -711,6 +744,11 @@ def molecule_timeline(molecule_dir: Optional[Path]) -> dict:
     timeline["total"] = parse_duration_minutes(
         _pharmacology_text(pharm, "duration")
     )
+    # une phrase de Wikipedia peut commencer par la valeur puis citer d'autres
+    # chiffres (dose, temps jusqu'au pic) : lecture stricte du debut de phrase
+    timeline["halflife"] = parse_lead_duration(
+        _pharmacology_text(pharm, "halflife")
+    )
     if timeline["total"] is None:
         parts = [timeline[k] for k in ("onset", "comeup", "peak", "offset")
                  if timeline[k]]
@@ -718,6 +756,23 @@ def molecule_timeline(molecule_dir: Optional[Path]) -> dict:
             timeline["total"] = (sum(p[0] for p in parts),
                                  sum(p[1] for p in parts))
     return timeline
+
+
+def halflife_points(start: datetime, timeline: Optional[dict] = None,
+                    limit: int = 8) -> list[tuple[int, datetime]]:
+    """Multiples de la demi-vie documentee apres une prise.
+
+    Renvoie [(1, t1), (2, t2), ...] ou tk = prise + k x demi-vie (borne basse
+    de la plage documentee), jusqu'a `limit`. Liste vide si la demi-vie n'est
+    pas connue.
+    """
+    if not isinstance(start, datetime):
+        return []
+    half = (timeline or {}).get("halflife")
+    if not half or float(half[0]) <= 0:
+        return []
+    step = timedelta(minutes=float(half[0]))
+    return [(k, start + step * k) for k in range(1, int(limit) + 1)]
 
 
 def influence_segments(timeline: Optional[dict] = None,
