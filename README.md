@@ -653,7 +653,11 @@ aucune donnée du répertoire de travail n'est modifiée.
   rouvre directement un dossier déjà utilisé, et propose de vider la liste.
 * **Thème sombre** : le menu **Affichage → Thème sombre** (case à cocher) bascule
   l'ensemble de l'interface — palette et graphiques compris — entre clair et
-  sombre ; le choix est mémorisé.
+  sombre ; le choix est mémorisé. Les deux thèmes partagent la même mise en
+  forme soignée (une feuille de style unique) : onglets soulignés d'un liseré
+  d'accent, boutons et champs à bords arrondis avec état de survol, en-têtes de
+  tableaux discrets, barres de défilement fines ; les vues peintes à la main
+  (frise du calendrier, courbes pharmacocinétiques) gardent leur rendu propre.
 * **Éditeur de synonymes** : le menu **Données → Éditeur de synonymes** (ou le
   bouton de la page Interactions) ouvre la table d'alias franco-anglaise utilisée
   pour rapprocher les noms de la base DDInter, et l'enregistre dans

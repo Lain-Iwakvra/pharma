@@ -209,6 +209,195 @@ def ensure_default_style(app) -> None:
         _ORIGINAL_PALETTE = QPalette(app.palette())
 
 
+def _design_tokens() -> dict[str, str]:
+    """Couleurs de la feuille de style, adaptées au thème actif.
+
+    Un accent unique (bleu) sert aux onglets actifs, aux focus et aux
+    sélections : l'interface gagne en cohérence sur les deux thèmes.
+    """
+    if _ACTIVE_THEME == "sombre":
+        return {
+            "window": "#252830", "panel": "#2b2f38", "base": "#2a2e36",
+            "alt": "#31363f", "border": "#3d434e", "text": "#e8eaf0",
+            "dim": "#a3abb8", "accent": "#6ea8fe", "on_accent": "#10151d",
+            "hover": "#343a45", "press": "#3d4450", "sel": "#35507a",
+            "sel_text": "#ffffff",
+        }
+    return {
+        "window": "#f3f4f7", "panel": "#ffffff", "base": "#ffffff",
+        "alt": "#f7f8fb", "border": "#dde0e6", "text": "#2c3038",
+        "dim": "#6b7280", "accent": "#3b6ea5", "on_accent": "#ffffff",
+        "hover": "#eceef2", "press": "#e0e3e9", "sel": "#d8e5f6",
+        "sel_text": "#1b2733",
+    }
+
+
+def app_stylesheet() -> str:
+    """Feuille de style (QSS) qui habille toute l'application.
+
+    Elle ne fait que des retouches de présentation : bords arrondis, états
+    de survol, onglets soulignés d'un liseré d'accent, en-têtes de tableaux
+    discrets, barres de défilement fines. Les widgets peints à la main
+    (graphiques, calendrier) gardent leur propre rendu.
+    """
+    from string import Template
+
+    colors = _design_tokens()
+    return Template("""
+QMainWindow, QDialog { background-color: $window; }
+QLabel { background: transparent; }
+QToolTip {
+    background-color: $panel; color: $text;
+    border: 1px solid $border; padding: 4px 7px;
+}
+
+/* --- barre de menus et menus --- */
+QMenuBar { background: transparent; padding: 2px 4px; }
+QMenuBar::item {
+    padding: 5px 10px; border-radius: 6px; background: transparent;
+}
+QMenuBar::item:selected { background-color: $hover; }
+QMenuBar::item:pressed { background-color: $press; }
+QMenu {
+    background-color: $panel; border: 1px solid $border; padding: 5px;
+}
+QMenu::item { padding: 5px 26px 5px 12px; border-radius: 5px; }
+QMenu::item:selected { background-color: $accent; color: $on_accent; }
+QMenu::item:disabled { color: $dim; }
+QMenu::separator { height: 1px; background: $border; margin: 5px 8px; }
+
+/* --- barres d'outils et boutons --- */
+QToolBar {
+    background: transparent; border: none; spacing: 3px; padding: 3px 4px;
+}
+QToolBar::separator {
+    background: $border; width: 1px; margin: 4px 6px;
+}
+QToolButton {
+    border: 1px solid transparent; border-radius: 6px;
+    padding: 3px; background: transparent;
+}
+QToolBar QToolButton { padding: 4px 9px; }
+QToolButton:hover { background-color: $hover; border-color: $border; }
+QToolButton:pressed { background-color: $press; }
+QToolButton:checked { background-color: $press; border-color: $accent; }
+
+QPushButton {
+    background-color: $panel; color: $text;
+    border: 1px solid $border; border-radius: 7px;
+    padding: 5px 14px; min-width: 64px;
+}
+QPushButton:hover { background-color: $hover; border-color: $accent; }
+QPushButton:pressed { background-color: $press; }
+QPushButton:default {
+    background-color: $accent; color: $on_accent; border-color: $accent;
+}
+QPushButton:default:hover { background-color: $accent; }
+QPushButton:disabled { color: $dim; border-color: $border; }
+
+/* --- champs de saisie --- */
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox,
+QDateEdit, QDateTimeEdit, QTimeEdit, QComboBox {
+    background-color: $base; color: $text;
+    border: 1px solid $border; border-radius: 6px; padding: 4px 7px;
+    selection-background-color: $accent; selection-color: $on_accent;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus,
+QDoubleSpinBox:focus, QDateEdit:focus, QDateTimeEdit:focus,
+QTimeEdit:focus, QComboBox:focus { border-color: $accent; }
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled,
+QPlainTextEdit:disabled { color: $dim; }
+QComboBox::drop-down { border: none; width: 22px; }
+QComboBox > QLineEdit { border: none; background: transparent; padding: 0; }
+QComboBox QAbstractItemView {
+    background-color: $panel; color: $text;
+    border: 1px solid $border; outline: none;
+    selection-background-color: $accent; selection-color: $on_accent;
+}
+
+/* --- vues et tableaux --- */
+QTreeView, QTableView, QListView {
+    background-color: $base; alternate-background-color: $alt;
+    border: 1px solid $border; border-radius: 8px;
+    selection-background-color: $sel; selection-color: $sel_text;
+    outline: none;
+}
+QTreeView::item:selected, QTableView::item:selected,
+QListView::item:selected { background-color: $sel; color: $sel_text; }
+QTreeView::item, QTableView::item { padding: 2px 3px; }
+QHeaderView { background: transparent; }
+QHeaderView::section {
+    background-color: $alt; color: $text; padding: 5px 8px;
+    border: none; border-bottom: 1px solid $border;
+    border-right: 1px solid $border;
+}
+QHeaderView::section:hover { background-color: $hover; }
+QTableCornerButton::section { background-color: $alt; border: none; }
+
+/* --- onglets --- */
+QTabWidget::pane {
+    border: 1px solid $border; border-radius: 10px;
+    background-color: $panel; top: -1px;
+}
+QTabBar::tab {
+    background: transparent; color: $dim;
+    padding: 7px 15px; margin-right: 2px;
+    border: none; border-bottom: 2px solid transparent;
+}
+QTabBar::tab:hover {
+    color: $text; background-color: $hover;
+    border-top-left-radius: 7px; border-top-right-radius: 7px;
+}
+QTabBar::tab:selected {
+    color: $accent; border-bottom: 2px solid $accent;
+}
+QTabBar::tab:disabled { color: $dim; }
+QTabBar::close-button { margin: 2px; }
+
+/* --- barres de défilement --- */
+QScrollBar:vertical { background: transparent; width: 12px; margin: 2px; }
+QScrollBar:horizontal { background: transparent; height: 12px; margin: 2px; }
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background-color: $border; border-radius: 4px;
+}
+QScrollBar::handle:vertical { min-height: 30px; }
+QScrollBar::handle:horizontal { min-width: 30px; }
+QScrollBar::handle:hover { background-color: $accent; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* --- divers --- */
+QSplitter::handle { background: transparent; }
+QSplitter::handle:horizontal { width: 6px; }
+QSplitter::handle:vertical { height: 6px; }
+QSplitter::handle:hover { background-color: $border; }
+QGroupBox {
+    border: 1px solid $border; border-radius: 8px;
+    margin-top: 10px; padding: 8px; background-color: $panel;
+}
+QGroupBox::title {
+    subcontrol-origin: margin; left: 12px; padding: 0 4px;
+    color: $dim; font-weight: bold;
+}
+QProgressBar {
+    background-color: $base; color: $text;
+    border: 1px solid $border; border-radius: 6px;
+    text-align: center; max-height: 14px;
+}
+QProgressBar::chunk { background-color: $accent; border-radius: 5px; }
+QStatusBar { background-color: $window; color: $dim; }
+QStatusBar::item { border: none; }
+QCheckBox, QRadioButton { spacing: 6px; }
+
+/* --- carte (écran d'accueil, encarts) --- */
+QFrame#card {
+    background-color: $panel; border: 1px solid $border; border-radius: 12px;
+}
+QFrame#card QLabel#heroTitle { color: $text; }
+QFrame#card QLabel#heroText { color: $dim; }
+""").substitute(colors)
+
+
 def apply_theme(app, mode: str) -> str:
     """Applique le thème clair ou sombre à toute l'application.
 
@@ -225,6 +414,7 @@ def apply_theme(app, mode: str) -> str:
     app.setStyle("Fusion")
     app.setPalette(_dark_palette() if mode == "sombre"
                    else QPalette(_ORIGINAL_PALETTE))
+    app.setStyleSheet(app_stylesheet())
     return mode
 
 
@@ -1715,24 +1905,37 @@ class WelcomePane(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.addStretch(1)
-        title = QLabel("Atelier de recherche psychopharmacologique", self)
+        outer = QVBoxLayout(self)
+        outer.addStretch(1)
+        # la présentation tient dans une « carte » aux bords arrondis, plus
+        # accueillante qu'un simple empilement de textes centrés.
+        card = QFrame(self)
+        card.setObjectName("card")
+        card.setMaximumWidth(620)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(36, 32, 36, 32)
+        layout.setSpacing(14)
+        title = QLabel("Atelier de recherche psychopharmacologique", card)
+        title.setObjectName("heroTitle")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        title.setWordWrap(True)
+        title.setStyleSheet("font-size: 22px; font-weight: bold;")
         layout.addWidget(title)
         text = QLabel(
-            "Choisissez un répertoire de travail : il contiendra un dossier par\n"
-            "molécule (PDF Wikipédia + résumé) et vos documents.\n\n" + DISCLAIMER,
-            self,
+            "Choisissez un répertoire de travail : il contiendra un dossier "
+            "par molécule (PDF Wikipédia + résumé) et vos documents.\n\n"
+            + DISCLAIMER,
+            card,
         )
+        text.setObjectName("heroText")
         text.setAlignment(Qt.AlignCenter)
-        text.setStyleSheet("color: palette(mid);")
+        text.setWordWrap(True)
         layout.addWidget(text)
-        button = QPushButton("Choisir un répertoire de travail…", self)
+        button = QPushButton("Choisir un répertoire de travail…", card)
         button.clicked.connect(self.chooseRequested.emit)
         layout.addWidget(button, alignment=Qt.AlignCenter)
-        layout.addStretch(1)
+        outer.addWidget(card, alignment=Qt.AlignHCenter)
+        outer.addStretch(1)
 
 
 # --- page comparaison : tableau des molecules --------------------------------
