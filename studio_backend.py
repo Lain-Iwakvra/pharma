@@ -3891,6 +3891,135 @@ def interaction_rows_to_csv(path: Path, rows) -> Path:
     return path
 
 
+def comparison_rows_to_csv(path: Path, columns, rows) -> Path:
+    """Ecrit le tableau de comparaison en CSV (« ; » et BOM Excel fr).
+
+    `columns` : couples (libelle, cle). `__name` et `__state` sont des cles
+    speciales ; les autres correspondent au dictionnaire `fields` d'une ligne.
+    """
+    path = Path(path)
+    columns = list(columns or [])
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow([str(label) for label, _key in columns])
+        for row in rows or []:
+            fields = row.get("fields") or {}
+            values = []
+            for _label, key in columns:
+                if key == "__name":
+                    value = row.get("name", "")
+                elif key == "__state":
+                    value = row.get("state", "")
+                else:
+                    value = fields.get(key, "")
+                if isinstance(value, (list, tuple)):
+                    value = ", ".join(str(item) for item in value)
+                values.append(str(value))
+            writer.writerow(values)
+    return path
+
+
+def calendar_rows_to_csv(path: Path, entries) -> Path:
+    """Ecrit le journal des prises en CSV (« ; » et BOM Excel fr)."""
+    path = Path(path)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow(["molecule", "debut", "dose", "duree_min", "note"])
+        for entry in entries or []:
+            entry = normalise_entry(entry)
+            writer.writerow([
+                entry["molecule"], entry["start"], entry["dose"],
+                entry.get("duree_min") or "", entry.get("note", ""),
+            ])
+    return path
+
+
+def _ical_fold(line: str) -> list[str]:
+    """Pliage iCalendar : lignes de 75 octets au plus (RFC 5545)."""
+    raw = str(line).encode("utf-8")
+    if len(raw) <= 75:
+        return [raw.decode("utf-8")]
+    chunks: list[str] = []
+    current = b""
+    for char in str(line):
+        piece = char.encode("utf-8")
+        limit = 75 if not chunks else 74
+        if len(current) + len(piece) > limit:
+            chunks.append(current.decode("utf-8"))
+            current = piece
+        else:
+            current += piece
+    chunks.append(current.decode("utf-8"))
+    return chunks
+
+
+def _ical_text(value: str) -> str:
+    """Echappe le texte iCalendar (virgules, points-virgules, antislashs)."""
+    text = str(value or "")
+    text = text.replace("\\", "\\\\").replace(";", "\\;")
+    text = text.replace(",", "\\,").replace("\r\n", "\\n")
+    return text.replace("\n", "\\n")
+
+
+def calendar_entries_to_ical(path: Path, entries, durations=None) -> Path:
+    """Ecrit le journal des prises au format iCalendar (heure locale).
+
+    `durations` : durees en minutes, meme ordre que `entries` (0 ou absent =
+    evenement ponctuel). Chaque prise devient un VEVENT.
+    """
+    path = Path(path)
+    durations = list(durations or [])
+    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//pharma_studio//journal des prises//FR",
+        "CALSCALE:GREGORIAN",
+    ]
+    for index, entry in enumerate(entries or []):
+        entry = normalise_entry(entry)
+        try:
+            start = datetime.fromisoformat(entry["start"])
+        except ValueError:
+            continue
+        minutes = 0.0
+        if index < len(durations):
+            try:
+                minutes = float(durations[index] or 0)
+            except (TypeError, ValueError):
+                minutes = 0.0
+        title = entry["molecule"]
+        if entry["dose"]:
+            title += f" — {entry['dose']}"
+        details = []
+        if entry["dose"]:
+            details.append(f"Dose notée : {entry['dose']}")
+        if entry.get("note"):
+            details.append(str(entry["note"]))
+        details.append("Journal de recherche documentaire — pas une donnée "
+                       "médicale.")
+        body = [
+            "BEGIN:VEVENT",
+            f"UID:prise-{index}-{stamp}@pharma_studio",
+            f"DTSTAMP:{stamp}",
+            f"DTSTART:{start.strftime('%Y%m%dT%H%M%S')}",
+        ]
+        if minutes > 0:
+            body.append(
+                f"DTEND:{(start + timedelta(minutes=minutes)).strftime('%Y%m%dT%H%M%S')}"
+            )
+        else:
+            body.append("DURATION:PT0M")
+        body.append(f"SUMMARY:{_ical_text(title)}")
+        body.append(f"DESCRIPTION:{_ical_text(chr(10).join(details))}")
+        body.append("END:VEVENT")
+        for raw_line in body:
+            lines.extend(_ical_fold(raw_line))
+    lines.append("END:VCALENDAR")
+    path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    return path
+
+
 # -- Wikidata : propriete « interaction significative » (P769) -----------------
 def wikidata_cache_path(cache_dir: Path | None = None) -> Path:
     return (Path(cache_dir) if cache_dir else ddinter_cache_dir()) / (

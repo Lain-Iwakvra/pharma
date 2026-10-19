@@ -611,6 +611,25 @@ des fichiers JSON, en plus de leur mémorisation automatique (`QSettings`) :
 * Un fichier absent, illisible ou d'un format inconnu produit un message
   clair sans rien modifier.
 
+### Exporter les données
+
+Chaque page de données propose un export adapté, depuis sa barre d'outils :
+
+* **Comparaison** : *Exporter CSV…* écrit les **lignes affichées** (filtre
+  compris) avec les **colonnes visibles**, séparateur `;` et BOM (lisible
+  directement par Excel en français).
+* **Interactions** : *Exporter CSV…* écrit les paires affichées (molecule A /
+  B, niveau, mécanisme, sources, détail).
+* **Calendrier** : *Exporter CSV…* écrit le journal des prises (molécule,
+  début, dose, durée, note) ; *Exporter iCal…* produit un fichier `.ics`
+  (un `VEVENT` par prise, agenda importable) dont la durée d'effet estimée
+  provient des durées documentées ou de la durée saisie.
+* **Pharmacocinétique** : *Exporter PNG…* enregistre le graphique courant
+  (courbes visibles, échelle comprise) dans une image.
+
+Les exports CSV/iCal/Png n'écrivent que des fichiers choisis par l'utilisateur ;
+aucune donnée du répertoire de travail n'est modifiée.
+
 ### Recherche, annulation et apparence
 
 * **Filtre par onglet** : chaque page de données possède un champ de recherche

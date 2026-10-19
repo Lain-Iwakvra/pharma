@@ -1859,6 +1859,7 @@ class ComparePane(QWidget):
     refreshRequested = Signal()
     saveRequested = Signal(object)
     loadRequested = Signal(object)
+    exportRequested = Signal()
     openRequested = Signal(object)
     pathDropped = Signal(object)   # chemin depose depuis l'explorateur
     rowsChanged = Signal()         # ordre des lignes modifie (a persister)
@@ -1930,6 +1931,13 @@ class ComparePane(QWidget):
         )
         load_c.triggered.connect(lambda: self.loadRequested.emit("comparaison"))
         bar.addAction(load_c)
+        export = QAction("Exporter CSV…", self)
+        export.setToolTip(
+            "Écrit dans un fichier CSV les lignes affichées (filtre compris) "
+            "et les colonnes visibles."
+        )
+        export.triggered.connect(self.exportRequested)
+        bar.addAction(export)
         bar.addSeparator()
         columns_button = QToolButton(self)
         columns_button.setText("Colonnes")
@@ -2035,6 +2043,15 @@ class ComparePane(QWidget):
                 parts.append(str(value))
         blob = rm.fold_accents(" \u2022 ".join(parts)).casefold()
         return self._filter in blob
+
+    def visible_columns(self) -> list[tuple[str, str]]:
+        """Colonnes affichées (libelle, cle), dans l'ordre courant."""
+        return [(label, key) for label, key in self.columns
+                if key not in self._hidden]
+
+    def export_rows(self) -> list[dict]:
+        """Lignes actuellement affichées (filtre appliqué), dans l'ordre."""
+        return [row for row in self.rows if self._row_matches(row)]
 
     def show_rows(self, rows: list[dict]) -> None:
         """(Re)construit le tableau. Ligne = name, dir, state, fields."""
@@ -3252,6 +3269,8 @@ class CalendarPane(QWidget):
     saveRequested = Signal()
     loadRequested = Signal()
     clearRequested = Signal()
+    exportCsvRequested = Signal()
+    exportIcalRequested = Signal()
 
     ZOOMS = ("Année", "Mois", "Jour")
 
@@ -3314,6 +3333,20 @@ class CalendarPane(QWidget):
         clear_action.setToolTip("Vider le journal des prises")
         clear_action.triggered.connect(lambda: self.clearRequested.emit())
         bar.addAction(clear_action)
+        export_csv = QAction("Exporter CSV…", self)
+        export_csv.setToolTip(
+            "Écrit le journal des prises (molécule, début, dose, durée, note) "
+            "dans un fichier CSV."
+        )
+        export_csv.triggered.connect(lambda: self.exportCsvRequested.emit())
+        bar.addAction(export_csv)
+        export_ical = QAction("Exporter iCal…", self)
+        export_ical.setToolTip(
+            "Écrit le journal des prises au format iCalendar (.ics), "
+            "importable dans un agenda."
+        )
+        export_ical.triggered.connect(lambda: self.exportIcalRequested.emit())
+        bar.addAction(export_ical)
         bar.addSeparator()
         bar.addWidget(QLabel("Vue :", self))
         self.zoom = QComboBox(self)
@@ -4404,6 +4437,7 @@ class PharmacoPane(QWidget):
     traceRequested = Signal(str, str)
     pathDropped = Signal(object)
     changed = Signal()
+    exportPngRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4468,6 +4502,11 @@ class PharmacoPane(QWidget):
             "Supprimer la courbe sélectionnée (touche Suppr)")
         self.remove_button.clicked.connect(self.remove_selected)
         actions.addWidget(self.remove_button)
+        self.export_button = QPushButton("Exporter PNG…", left)
+        self.export_button.setToolTip(
+            "Enregistrer le graphique courant dans une image PNG.")
+        self.export_button.clicked.connect(self.exportPngRequested)
+        actions.addWidget(self.export_button)
         column.addLayout(actions)
 
         self.log_check = QCheckBox("Échelle logarithmique (axe vertical)", left)
@@ -4864,6 +4903,7 @@ class MainWindow(QMainWindow):
         self.compare.refreshRequested.connect(self._compare_reload)
         self.compare.saveRequested.connect(self.save_tables)
         self.compare.loadRequested.connect(self.load_tables)
+        self.compare.exportRequested.connect(self._compare_export)
         self.compare.openRequested.connect(self._compare_open)
         # glisser-deposer depuis l'explorateur + reordonnancement manuel
         self.compare.pathDropped.connect(self._compare_add_from_tree)
@@ -4931,6 +4971,8 @@ class MainWindow(QMainWindow):
         self.calendar.saveRequested.connect(self._calendar_save_file)
         self.calendar.loadRequested.connect(self._calendar_load_file)
         self.calendar.clearRequested.connect(self._calendar_clear)
+        self.calendar.exportCsvRequested.connect(self._calendar_export_csv)
+        self.calendar.exportIcalRequested.connect(self._calendar_export_ical)
         self.calendar.curveRequested.connect(self._calendar_curve)
         self.calendar.dayCurvesRequested.connect(self._calendar_day_curves)
         self.calendar_splitter = QSplitter(Qt.Horizontal, self)
@@ -4947,6 +4989,7 @@ class MainWindow(QMainWindow):
         self.pharmaco.traceRequested.connect(self._pharmaco_trace_dialog)
         self.pharmaco.pathDropped.connect(self._pharmaco_add_from_tree)
         self.pharmaco.changed.connect(self._commit_history)
+        self.pharmaco.exportPngRequested.connect(self._pharmaco_export_png)
         self.pages.addTab(self.pharmaco, "Pharmacocinétique")
 
         # non fermables : cinq onglets permanents, comme des modes de la fenetre
@@ -6129,6 +6172,25 @@ class MainWindow(QMainWindow):
             f"{len(same_day)} prise(s) du {day} superposée(s) — courbes "
             "estimées, non comparables entre molécules.")
 
+    def _pharmaco_export_png(self) -> None:
+        """Enregistre le graphique courant dans une image PNG."""
+        if not self.pharmaco.series:
+            self.pharmaco.message.setText("Aucune courbe à exporter.")
+            return
+        default = (str(self.root / "pharmacocinetique.png")
+                   if self.root is not None else "pharmacocinetique.png")
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Exporter le graphique", default, "Image PNG (*.png)"
+        )
+        if not path:
+            return
+        image = self.pharmaco.chart.grab()
+        if not image.save(path, "PNG"):
+            QMessageBox.warning(self, "Écriture impossible",
+                                f"Impossible d'écrire : {path}")
+            return
+        self.statusBar().showMessage(f"Exporté : {path}", 6000)
+
     def _pharmaco_add_from_tree(self, path) -> None:
         """Dépôt d'un dossier/fichier de molécule : trace sa courbe."""
         path = Path(path)
@@ -6220,6 +6282,56 @@ class MainWindow(QMainWindow):
         self._calendar_store()
         self._commit_history()
         self.statusBar().showMessage("Calendrier effacé.", 4000)
+
+    def _calendar_export_csv(self) -> None:
+        """Ecrit le journal des prises en CSV."""
+        entries = self._calendar_items()
+        if not entries:
+            self.statusBar().showMessage("Le journal est vide.", 5000)
+            return
+        default = (str(self.root / "calendrier.csv")
+                   if self.root is not None else "calendrier.csv")
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Exporter le journal (CSV)", default,
+            "Fichier CSV (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            sb.calendar_rows_to_csv(Path(path), entries)
+        except OSError as exc:
+            QMessageBox.warning(self, "Écriture impossible", str(exc))
+            return
+        self.statusBar().showMessage(f"Exporté : {path}", 6000)
+
+    def _calendar_export_ical(self) -> None:
+        """Ecrit le journal des prises au format iCalendar (.ics)."""
+        entries = self._calendar_items()
+        if not entries:
+            self.statusBar().showMessage("Le journal est vide.", 5000)
+            return
+        default = (str(self.root / "calendrier.ics")
+                   if self.root is not None else "calendrier.ics")
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Exporter le journal (iCal)", default,
+            "Agenda iCalendar (*.ics)",
+        )
+        if not path:
+            return
+        timelines = self._calendar_timelines()
+        durations = []
+        for entry in entries:
+            key = CalendarPane.molecule_key(entry.get("molecule"))
+            segments = sb.influence_segments(
+                timelines.get(key), entry.get("duree_min")
+            )
+            durations.append(max((end for _p, _b, end in segments), default=0.0))
+        try:
+            sb.calendar_entries_to_ical(Path(path), entries, durations)
+        except OSError as exc:
+            QMessageBox.warning(self, "Écriture impossible", str(exc))
+            return
+        self.statusBar().showMessage(f"Exporté : {path}", 6000)
 
     def _restore_session(self) -> None:
         """A l'ouverture : recharge les tableaux et le calendrier de la
@@ -6566,6 +6678,27 @@ class MainWindow(QMainWindow):
         self.compare.show_rows([])
         self._compare_persist()
         self._commit_history()
+
+    def _compare_export(self) -> None:
+        """Ecrit les lignes affichees (filtre compris) en CSV."""
+        columns = self.compare.visible_columns()
+        rows = self.compare.export_rows()
+        if not rows:
+            self.statusBar().showMessage("Aucune ligne à exporter.", 5000)
+            return
+        default = (str(self.root / "comparaison.csv")
+                   if self.root is not None else "comparaison.csv")
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Exporter la comparaison", default, "Fichier CSV (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            sb.comparison_rows_to_csv(Path(path), columns, rows)
+        except OSError as exc:
+            QMessageBox.warning(self, "Écriture impossible", str(exc))
+            return
+        self.statusBar().showMessage(f"Exporté : {path}", 6000)
 
     def _compare_download_missing(self) -> None:
         """Bouton « Télécharger les absentes » : (re)met en file les lignes
