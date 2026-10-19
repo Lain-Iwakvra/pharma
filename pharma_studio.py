@@ -36,6 +36,7 @@ posologie.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -4402,6 +4403,7 @@ class PharmacoPane(QWidget):
 
     traceRequested = Signal(str, str)
     pathDropped = Signal(object)
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4529,6 +4531,7 @@ class PharmacoPane(QWidget):
         self.message.setText("")
         self.chart.set_series([])
         self.chart.set_selected(-1)
+        self.changed.emit()
 
     def remove_selected(self) -> None:
         """Supprime la courbe selectionnee (bouton Retirer, touche Suppr)."""
@@ -4538,6 +4541,7 @@ class PharmacoPane(QWidget):
         del self.series[index]
         self._refresh(select=min(index, len(self.series) - 1) if self.series
                       else None)
+        self.changed.emit()
 
     def toggle_selected(self) -> None:
         """Affiche / masque la courbe selectionnee sur le graphique."""
@@ -4553,6 +4557,7 @@ class PharmacoPane(QWidget):
             self.list.blockSignals(False)
         self.chart.set_series(self.series)
         self.chart.set_selected(self._current_index())
+        self.changed.emit()
 
     def add_report(self, molecule, dose, report, start=None) -> None:
         molecule = str(molecule or "").strip()
@@ -4587,6 +4592,7 @@ class PharmacoPane(QWidget):
         else:
             self.series.append(serie)
         self._refresh(select=row)
+        self.changed.emit()
 
     # -- affichage --------------------------------------------------------
     @staticmethod
@@ -4819,6 +4825,8 @@ class MainWindow(QMainWindow):
         self._task: Task | None = None
         self._workers: list[Worker] = []
         self.settings = QSettings(ORG_NAME, APP_NAME)
+        self._undo_stack: list[dict] = []
+        self._redo_stack: list[dict] = []
         self._apply_saved_theme()
 
         self.workspace = WorkspacePane(Path.cwd())
@@ -4859,7 +4867,7 @@ class MainWindow(QMainWindow):
         self.compare.openRequested.connect(self._compare_open)
         # glisser-deposer depuis l'explorateur + reordonnancement manuel
         self.compare.pathDropped.connect(self._compare_add_from_tree)
-        self.compare.rowsChanged.connect(self._compare_persist)
+        self.compare.rowsChanged.connect(self._compare_rows_changed)
         self.compare_splitter = QSplitter(Qt.Horizontal, self)
         self.compare_splitter.addWidget(self.compare)
         self.compare_splitter.setStretchFactor(0, 1)
@@ -4938,6 +4946,7 @@ class MainWindow(QMainWindow):
         self.pharmaco = PharmacoPane(self)
         self.pharmaco.traceRequested.connect(self._pharmaco_trace_dialog)
         self.pharmaco.pathDropped.connect(self._pharmaco_add_from_tree)
+        self.pharmaco.changed.connect(self._commit_history)
         self.pages.addTab(self.pharmaco, "Pharmacocinétique")
 
         # non fermables : cinq onglets permanents, comme des modes de la fenetre
@@ -5016,6 +5025,25 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        edit_menu = self.menuBar().addMenu("&Édition")
+        self.undo_action = QAction("Annuler", self)
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.setToolTip(
+            "Annule la dernière modification (comparaison, interactions, "
+            "calendrier, courbes).")
+        self.undo_action.setEnabled(False)
+        self.undo_action.triggered.connect(self.undo)
+        edit_menu.addAction(self.undo_action)
+        self.redo_action = QAction("Rétablir", self)
+        self.redo_action.setShortcuts([
+            QKeySequence.Redo, QKeySequence("Ctrl+Shift+Z"),
+            QKeySequence("Ctrl+Y"),
+        ])
+        self.redo_action.setToolTip("Rétablit la modification annulée.")
+        self.redo_action.setEnabled(False)
+        self.redo_action.triggered.connect(self.redo)
+        edit_menu.addAction(self.redo_action)
+
         search_menu = self.menuBar().addMenu("&Recherche")
         find_action = QAction("Rechercher dans le document", self)
         find_action.setShortcut(QKeySequence.Find)
@@ -5073,7 +5101,6 @@ class MainWindow(QMainWindow):
         page_pk.setShortcut("Ctrl+5")
         page_pk.triggered.connect(lambda: self.show_page(4))
         view_menu.addAction(page_pk)
-        view_menu.addAction(page_cal)
         view_menu.addSeparator()
         self.theme_action = QAction("Thème sombre", self, checkable=True)
         self.theme_action.setToolTip("Bascule entre thème clair et thème sombre.")
@@ -5121,6 +5148,80 @@ class MainWindow(QMainWindow):
             self.interactions.show_rows(rows)
         if getattr(self.calendar, "entries", None):
             self.calendar._rebuild()
+
+    # -- annuler / rétablir ------------------------------------------------
+    HISTORY_LIMIT = 60
+
+    def _init_history(self) -> None:
+        """Point de depart de l'historique (apres ouverture d'un repertoire)."""
+        self._undo_stack = [self._snapshot()]
+        self._redo_stack = []
+        self._update_history_actions()
+
+    def _snapshot(self) -> dict:
+        """État des quatre onglets de données (pour annuler / rétablir)."""
+        return {
+            "compare": copy.deepcopy(list(self.compare.rows)),
+            "interactions": list(self.interactions.names()),
+            "calendar": copy.deepcopy(list(self._calendar_items())),
+            "pharmaco": copy.deepcopy(list(self.pharmaco.series)),
+        }
+
+    def _commit_history(self) -> None:
+        """Empile l'état courant s'il diffère du précédent."""
+        if not hasattr(self, "_undo_stack"):
+            return
+        try:
+            snap = self._snapshot()
+        except Exception:  # pragma: no cover - l'historique ne doit pas bloquer
+            return
+        if self._undo_stack and snap == self._undo_stack[-1]:
+            return
+        self._undo_stack.append(snap)
+        if len(self._undo_stack) > self.HISTORY_LIMIT:
+            del self._undo_stack[0]
+        self._redo_stack = []
+        self._update_history_actions()
+
+    def undo(self) -> None:
+        """Annule la dernière modification enregistrée."""
+        if len(getattr(self, "_undo_stack", [])) <= 1:
+            self.statusBar().showMessage("Rien à annuler.", 3000)
+            return
+        self._redo_stack.append(self._undo_stack.pop())
+        self._restore_snapshot(self._undo_stack[-1])
+        self._update_history_actions()
+        self.statusBar().showMessage("Action annulée.", 3000)
+
+    def redo(self) -> None:
+        """Rétablit la modification annulée."""
+        if not getattr(self, "_redo_stack", None):
+            self.statusBar().showMessage("Rien à rétablir.", 3000)
+            return
+        snap = self._redo_stack.pop()
+        self._undo_stack.append(snap)
+        self._restore_snapshot(snap)
+        self._update_history_actions()
+        self.statusBar().showMessage("Action rétablie.", 3000)
+
+    def _restore_snapshot(self, snap: dict) -> None:
+        self.compare.show_rows(copy.deepcopy(snap.get("compare") or []))
+        self._compare_persist()
+        self.interactions.set_names(list(snap.get("interactions") or []))
+        self._interactions_persist()
+        self._interactions_refresh()
+        self._calendar_entries = copy.deepcopy(snap.get("calendar") or [])
+        self._calendar_store()
+        self.pharmaco.series = copy.deepcopy(snap.get("pharmaco") or [])
+        self.pharmaco._refresh()
+
+    def _update_history_actions(self) -> None:
+        undo_action = getattr(self, "undo_action", None)
+        if undo_action is not None:
+            undo_action.setEnabled(len(self._undo_stack) > 1)
+        redo_action = getattr(self, "redo_action", None)
+        if redo_action is not None:
+            redo_action.setEnabled(bool(self._redo_stack))
 
     def _edit_synonyms(self) -> None:
         """Ouvre l'éditeur de la table d'alias DDInter (synonyms.json)."""
@@ -5240,6 +5341,7 @@ class MainWindow(QMainWindow):
         self._remove_welcome()
         self.summary.clear()
         self._restore_session()
+        self._init_history()
         self.statusBar().showMessage(f"Répertoire de travail : {root}", 5000)
 
     def _show_welcome(self) -> None:
@@ -5916,6 +6018,7 @@ class MainWindow(QMainWindow):
         result = sb.normalise_entry(result)
         self._calendar_items().append(result)
         self._calendar_store()
+        self._commit_history()
         try:
             moment = datetime.fromisoformat(result["start"])
         except ValueError:
@@ -5939,6 +6042,7 @@ class MainWindow(QMainWindow):
             return
         items[index] = sb.normalise_entry(result)
         self._calendar_store()
+        self._commit_history()
 
     def _calendar_remove(self, entry) -> None:
         entry = sb.normalise_entry(entry)
@@ -5955,6 +6059,7 @@ class MainWindow(QMainWindow):
         except ValueError:
             return
         self._calendar_store()
+        self._commit_history()
 
     def _calendar_add_from_tree(self, path) -> None:
         """Depot d'un dossier/fichier de molecule : nouvelle prise pre-remplie."""
@@ -6085,6 +6190,7 @@ class MainWindow(QMainWindow):
                 return
         self._calendar_entries = list(entries)
         self._calendar_store()
+        self._commit_history()
         self.statusBar().showMessage(
             f"Calendrier chargé : {len(entries)} prise(s) — {path}", 5000
         )
@@ -6112,6 +6218,7 @@ class MainWindow(QMainWindow):
             return
         self._calendar_entries = []
         self._calendar_store()
+        self._commit_history()
         self.statusBar().showMessage("Calendrier effacé.", 4000)
 
     def _restore_session(self) -> None:
@@ -6204,6 +6311,11 @@ class MainWindow(QMainWindow):
         self.settings.setValue(
             "compare_list", json.dumps(items, ensure_ascii=False)
         )
+
+    def _compare_rows_changed(self) -> None:
+        """Ordre des lignes modifié (glisser-déposer) : persiste + historique."""
+        self._compare_persist()
+        self._commit_history()
 
     def _compare_activate(self) -> None:
         """A chaque passage sur la page : recharge le tableau depuis le
@@ -6340,6 +6452,7 @@ class MainWindow(QMainWindow):
                 f"« {entry['name']} » disponible dans le tableau.", 5000
             )
         self._compare_persist()
+        self._commit_history()
         self._compare_pump()
 
     def _compare_add(self, name: str, directory: Path | None = None) -> None:
@@ -6370,6 +6483,7 @@ class MainWindow(QMainWindow):
                        "state": "absente", "fields": {}}
         self.compare.show_rows(list(self.compare.rows) + [row])
         self._compare_persist()
+        self._commit_history()
         if row["state"] == "absente":
             self._compare_enqueue(row)
             self._compare_pump()
@@ -6435,6 +6549,7 @@ class MainWindow(QMainWindow):
         ]
         self.compare.show_rows(rows)
         self._compare_persist()
+        self._commit_history()
 
     def _compare_clear(self) -> None:
         if not self.compare.rows:
@@ -6450,6 +6565,7 @@ class MainWindow(QMainWindow):
         self._compare_queue = []
         self.compare.show_rows([])
         self._compare_persist()
+        self._commit_history()
 
     def _compare_download_missing(self) -> None:
         """Bouton « Télécharger les absentes » : (re)met en file les lignes
@@ -6691,6 +6807,7 @@ class MainWindow(QMainWindow):
         self.interactions.add_names([name])
         self._interactions_persist()
         self._interactions_refresh()
+        self._commit_history()
 
     def _interactions_suggestions(self) -> list[str]:
         suggestions: list[str] = []
@@ -6739,6 +6856,7 @@ class MainWindow(QMainWindow):
         self.interactions.set_names(remaining)
         self._interactions_persist()
         self._interactions_refresh()
+        self._commit_history()
 
     def _interactions_clear(self) -> None:
         if not self.interactions.names():
@@ -6753,6 +6871,7 @@ class MainWindow(QMainWindow):
         self.interactions.set_names([])
         self._interactions_persist()
         self._interactions_refresh()
+        self._commit_history()
 
     def _interactions_use_compare(self) -> None:
         names = [str(row.get("name", "")) for row in self.compare.rows]
@@ -6768,6 +6887,7 @@ class MainWindow(QMainWindow):
         self.interactions.set_names(merged)
         self._interactions_persist()
         self._interactions_refresh()
+        self._commit_history()
         self.statusBar().showMessage(
             f"{len(self.interactions.names())} molécule(s) reprises de la "
             "comparaison.", 5000,

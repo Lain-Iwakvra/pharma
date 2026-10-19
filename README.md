@@ -574,13 +574,17 @@ relative** d'une molécule après une prise, à partir de sa dose et de son
   échelles du graphique se recalculent sur les courbes visibles.
 * **Supprimer une courbe** : le bouton ***Retirer***, la touche **Suppr**
   (ou Retour arrière) ou le menu contextuel enlèvent la courbe sélectionnée.
+* **Échelle logarithmique** : la case *Échelle logarithmique (axe vertical)*
+  étale les fins de courbe (élimination lente), que l'axe linéaire écrase.
 * Le panneau de gauche rappelle les **paramètres utilisés** (demi-vie, Tmax
   et sa source, constantes, biodisponibilité, durée) ; une molécule sans
   demi-vie documentée donne un message clair au lieu d'une courbe.
 * **Depuis le calendrier** : double-cliquer une prise (liste du jour ou ligne
   de la frise) bascule sur cette page et affiche la courbe correspondant à la
-  molécule, la dose et la date de la prise. On peut aussi déposer un dossier
-  de molécule de l'explorateur sur la page.
+  molécule, la dose et la date de la prise. Le bouton ***Courbes du jour…***
+  (ou le menu contextuel d'une prise) **superpose toutes les prises d'une même
+  journée** en une seule fois. On peut aussi déposer un dossier de molécule de
+  l'explorateur sur la page.
 
 ### Enregistrer et charger les tableaux
 
@@ -607,6 +611,30 @@ des fichiers JSON, en plus de leur mémorisation automatique (`QSettings`) :
 * Un fichier absent, illisible ou d'un format inconnu produit un message
   clair sans rien modifier.
 
+### Recherche, annulation et apparence
+
+* **Filtre par onglet** : chaque page de données possède un champ de recherche
+  qui **n'affiche que les lignes correspondantes** — *Comparaison* (toutes
+  colonnes), *Interactions* (molécules, mécanisme, sources), *Calendrier*
+  (molécule : la frise et la liste du jour se limitent aux prises filtrées) et
+  *Pharmacocinétique* (la liste des courbes ; le graphique conserve toutes les
+  courbes tracées). La comparaison se fait **sans accents ni casse**.
+* **Annuler / rétablir** : `Ctrl+Z` annule, `Ctrl+Y` (ou `Ctrl+Shift+Z`)
+  rétablit, sur les quatre pages de données (ajout/retrait de molécules,
+  ordre des lignes, noms d'interactions, prises du calendrier, courbes
+  pharmacocinétiques). Le menu **Édition** rappelle ces deux actions, grisées
+  quand il n'y a rien à faire ; l'historique (60 étapes) est remis à zéro à
+  l'ouverture d'un répertoire de travail.
+* **Répertoires récents** : le menu **Fichier → Répertoires récents** (10 max)
+  rouvre directement un dossier déjà utilisé, et propose de vider la liste.
+* **Thème sombre** : le menu **Affichage → Thème sombre** (case à cocher) bascule
+  l'ensemble de l'interface — palette et graphiques compris — entre clair et
+  sombre ; le choix est mémorisé.
+* **Éditeur de synonymes** : le menu **Données → Éditeur de synonymes** (ou le
+  bouton de la page Interactions) ouvre la table d'alias franco-anglaise utilisée
+  pour rapprocher les noms de la base DDInter, et l'enregistre dans
+  `~/.cache/pharma/ddinter/synonyms.json`.
+
 ### Raccourcis et confort
 
 * `Ctrl+O` répertoire de travail · `Ctrl+F` rechercher dans le document ·
@@ -614,6 +642,7 @@ des fichiers JSON, en plus de leur mémorisation automatique (`QSettings`) :
   `Ctrl+W` fermer l'onglet · `Ctrl+1` page Recherche ·
   `Ctrl+2` page Comparaison · `Ctrl+3` page Interactions ·
   `Ctrl+4` page Calendrier · `Ctrl+5` page Pharmacocinétique ·
+  `Ctrl+Z` annuler · `Ctrl+Y` rétablir ·
   `Ctrl+Shift+S` enregistrer les tableaux · `Ctrl+Shift+O` charger les tableaux ·
   `Ctrl+Alt+S` enregistrer le calendrier · `Ctrl+Alt+O` charger le calendrier.
 * Le volet droit affiche `resume.html` **déjà généré** : instantané, sans
@@ -646,8 +675,9 @@ de dosage.
   HTML, conversion du texte intégral Europe PMC en PDF, enregistrement et
   chargement des tableaux en JSON).
 * `pharma_studio.py` : interface de bureau PySide6 (3 volets, lecteur de
-  documents, dialogues d'ajout, page « Comparaison » avec son tableau et sa
-  file de téléchargement, page « Interactions »).
+  documents, dialogues d'ajout, pages « Comparaison » avec son tableau et sa
+  file de téléchargement, « Interactions », « Calendrier » et
+  « Pharmacocinétique »).
 * `requirements.txt` : dépendances (`requests`, `wikipedia`, `beautifulsoup4`,
   `PySide6`).
 * `README.md` : ce fichier.
