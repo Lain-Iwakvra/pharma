@@ -611,6 +611,219 @@ def load_tables(path, which: str = "both") -> dict:
     }
 
 
+# --- calendrier des prises ----------------------------------------------------
+# Journal personnel : une entree = molecule + date/heure + dose (texte libre).
+# L'outil ne propose aucune dose et ne donne aucun conseil : il enregistre ce
+# que l'utilisateur saisit et represente la periode d'effet estimee d'apres
+# les durees documentees de la molecule (voir molecule_timeline).
+CALENDAR_FORMAT = "pharma-calendrier"
+CALENDAR_VERSION = 1
+
+# Unites acceptees dans les durees de resume.json -> minutes.
+_DURATION_UNITS: tuple[tuple[str, float], ...] = (
+    ("secondes", 1.0 / 60.0), ("seconde", 1.0 / 60.0), ("seconds", 1.0 / 60.0),
+    ("second", 1.0 / 60.0), ("secs", 1.0 / 60.0), ("sec", 1.0 / 60.0),
+    ("minutes", 1.0), ("minute", 1.0), ("mins", 1.0), ("min", 1.0),
+    ("heures", 60.0), ("heure", 60.0), ("hours", 60.0), ("hour", 60.0),
+    ("hrs", 60.0), ("hr", 60.0),
+    ("jours", 1440.0), ("jour", 1440.0), ("days", 1440.0), ("day", 1440.0),
+    ("h", 60.0), ("min", 1.0), ("d", 1440.0), ("s", 1.0 / 60.0),
+)
+
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def calendar_path() -> Path:
+    """Fichier du journal des prises (~/.local/share/pharma/calendrier.json)."""
+    base = os.environ.get("XDG_DATA_HOME") or ""
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "pharma" / "calendrier.json"
+
+
+def parse_duration_minutes(text) -> Optional[tuple[float, float]]:
+    """« 3.0-5.0 hours » -> (180.0, 300.0) minutes ; None si illisible.
+
+    Accepte une plage (« a-b ») comme une valeur simple, en secondes,
+    minutes, heures ou jours (anglais ou francais). Seul le premier
+    groupe separe par « ; » est lu (un resume peut lister une duree par
+    voie d'administration).
+    """
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return None
+    raw = raw.split(";")[0]
+    unit = None
+    for word, factor in _DURATION_UNITS:
+        if re.search(r"(?<![a-z])" + word + r"(?![a-z])", raw):
+            unit = factor
+            break
+    if unit is None:
+        return None
+    numbers = [float(n.replace(",", ".")) for n in _NUMBER_RE.findall(raw)]
+    if not numbers:
+        return None
+    return (min(numbers) * unit, max(numbers) * unit)
+
+
+def _pharmacology_text(pharm: dict, key: str) -> str:
+    entry = pharm.get(key)
+    if isinstance(entry, dict):
+        for field_name in ("value", "pw", "wiki"):
+            text = str(entry.get(field_name) or "").strip()
+            if text:
+                return text
+        return ""
+    if isinstance(entry, str):
+        return entry.strip()
+    return ""
+
+
+def molecule_timeline(molecule_dir: Optional[Path]) -> dict:
+    """Durees d'action documentees d'une molecule, en minutes.
+
+    Lit `pharmacology` du `resume.json` et renvoie les phases de la plus
+    fiable a la moins directe : « onset » (temps d'apparition), « comeup »
+    (montee), « peak » (plateau), « offset » (descente) et « total » (duree
+    d'action du resume si presente, sinon somme des phases lues). Chaque
+    valeur est une plage (min, max) en minutes, ou None. Sert a estimer la
+    periode sous influence dans le calendrier ; ce n'est pas une donnee
+    medicale.
+    """
+    timeline: dict[str, Optional[tuple[float, float]]] = {
+        "onset": None, "comeup": None, "peak": None, "offset": None,
+        "total": None,
+    }
+    if not molecule_dir:
+        return timeline
+    try:
+        data = json.loads(
+            (Path(molecule_dir) / RESUME_JSON).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return timeline
+    if not isinstance(data, dict):
+        return timeline
+    pharm = data.get("pharmacology")
+    if not isinstance(pharm, dict):
+        pharm = {}
+    for key in ("onset", "comeup", "peak", "offset"):
+        timeline[key] = parse_duration_minutes(_pharmacology_text(pharm, key))
+    timeline["total"] = parse_duration_minutes(
+        _pharmacology_text(pharm, "duration")
+    )
+    if timeline["total"] is None:
+        parts = [timeline[k] for k in ("onset", "comeup", "peak", "offset")
+                 if timeline[k]]
+        if parts:
+            timeline["total"] = (sum(p[0] for p in parts),
+                                 sum(p[1] for p in parts))
+    return timeline
+
+
+def influence_segments(timeline: Optional[dict] = None,
+                       override_min: Optional[float] = None
+                       ) -> list[tuple[str, float, float]]:
+    """Phases d'une prise, en minutes apres la prise.
+
+    Renvoie [(libelle, debut, fin), ...] parmi « latence », « montee »,
+    « plateau », « descente » ; liste vide si aucune duree n'est connue.
+    Les valeurs hautes des plages documentees sont utilisees pour couvrir
+    toute la periode possible.
+
+    `override_min` (duree saisie a la main par l'utilisateur) remplace
+    l'estimation.
+    """
+    if override_min:
+        return [("durée indiquée", 0.0, float(override_min))]
+    timeline = timeline or {}
+    onset = timeline.get("onset") or (0.0, 0.0)
+    segments: list[tuple[str, float, float]] = []
+    if onset[0] > 0:
+        segments.append(("latence", 0.0, float(onset[0])))
+    cursor = float(onset[0])
+    comeup = timeline.get("comeup")
+    mont_end = float(onset[1]) + (float(comeup[1]) if comeup else 0.0)
+    if mont_end > cursor:
+        segments.append(("montée", cursor, mont_end))
+    cursor = max(cursor, mont_end)
+    peak = timeline.get("peak")
+    if peak:
+        end = cursor + float(peak[1])
+        segments.append(("plateau", cursor, end))
+        cursor = end
+    offset = timeline.get("offset")
+    if offset:
+        end = cursor + float(offset[1])
+        segments.append(("descente", cursor, end))
+        cursor = end
+    if not segments:
+        total = timeline.get("total")
+        if total:
+            segments.append(("durée documentée", 0.0, float(total[1])))
+    return segments
+
+
+def influence_end_minutes(timeline: Optional[dict] = None,
+                          override_min: Optional[float] = None) -> float:
+    """Fin de la periode d'effet, en minutes apres la prise (0 si inconnue)."""
+    segments = influence_segments(timeline, override_min)
+    return max((end for _, _, end in segments), default=0.0)
+
+
+def normalise_entry(entry: dict) -> dict:
+    """Entree de calendrier propre : molecule, start ISO, dose, note, duree."""
+    entry = entry if isinstance(entry, dict) else {}
+    duree = entry.get("duree_min")
+    try:
+        duree = int(float(duree)) if duree not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        duree = None
+    return {
+        "molecule": str(entry.get("molecule") or "").strip(),
+        "start": str(entry.get("start") or "").strip(),
+        "dose": str(entry.get("dose") or "").strip(),
+        "note": str(entry.get("note") or "").strip(),
+        "duree_min": duree,
+    }
+
+
+def save_calendar(entries, path: Optional[Path] = None) -> Path:
+    """Ecrit le journal des prises (JSON versionne) et renvoie le chemin."""
+    target = Path(path) if path else calendar_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    prises = [normalise_entry(e) for e in (entries or [])]
+    prises = [e for e in prises if e["molecule"] and e["start"]]
+    prises.sort(key=lambda e: e["start"])
+    payload = {
+        "format": CALENDAR_FORMAT,
+        "version": CALENDAR_VERSION,
+        "prises": prises,
+    }
+    target.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def load_calendar(path: Optional[Path] = None) -> list[dict]:
+    """Lit le journal des prises ; liste vide si absent ou illisible."""
+    source = Path(path) if path else calendar_path()
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    prises = data.get("prises")
+    if not isinstance(prises, list):
+        return []
+    out = [normalise_entry(e) for e in prises if isinstance(e, dict)]
+    out = [e for e in out if e["molecule"] and e["start"]]
+    out.sort(key=lambda e: e["start"])
+    return out
+
+
 # --- resume (parser) ---------------------------------------------------------
 def resume_markdown_path(molecule_dir: Path) -> Path:
     return Path(molecule_dir) / RESUME_MD

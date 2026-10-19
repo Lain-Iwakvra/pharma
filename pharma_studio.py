@@ -25,7 +25,10 @@ Lancement :
     python3 pharma_studio.py --workspace DIR  # dossier impose
 
 Rappel : outil de recherche documentaire. Ni avis medical, ni conseil de
-dosage.
+dosage. La page « Calendrier » tient un simple journal personnel des prises
+(molecule, date, dose) : elle enregistre ce que l'utilisateur saisit et
+estime la duree d'effet d'apres les durees documentees ; elle ne propose
+aucune posologie.
 """
 
 from __future__ import annotations
@@ -35,21 +38,26 @@ import json
 import os
 import shutil
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QDate,
+    QDateTime,
     QDir,
     QEvent,
     QMarginsF,
     QMimeData,
     QObject,
     QPointF,
+    QRectF,
     QRunnable,
     QSettings,
     QSize,
     Qt,
     QSortFilterProxyModel,
     QThreadPool,
+    QTime,
     QTimer,
     QUrl,
     Signal,
@@ -61,9 +69,12 @@ from PySide6.QtGui import (
     QColor,
     QDesktopServices,
     QDrag,
+    QFont,
     QKeySequence,
     QPageLayout,
     QPageSize,
+    QPainter,
+    QPen,
     QPixmap,
     QPdfWriter,
     QStandardItem,
@@ -79,11 +90,14 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QCompleter,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFileSystemModel,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -99,6 +113,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QStyle,
     QTabBar,
@@ -106,6 +121,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextBrowser,
+    QTimeEdit,
     QToolBar,
     QToolButton,
     QTreeView,
@@ -2397,6 +2413,786 @@ class InteractionsPane(QWidget):
 
 
 # --- fenetre principale -------------------------------------------------------
+# --- page calendrier : journal des prises -------------------------------------
+MOIS_FR = (
+    "janvier", "février", "mars", "avril", "mai", "juin", "juillet",
+    "août", "septembre", "octobre", "novembre", "décembre",
+)
+JOURS_FR = ("lundi", "mardi", "mercredi", "jeudi", "vendredi",
+            "samedi", "dimanche")
+JOURS_COURT_FR = ("lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim.")
+
+# Couleurs des phases d'effet estimees et rangs de priorite (pour teinter
+# un jour : le plateau prime sur la montee, etc.).
+PHASE_COLORS = {
+    "latence": "#dcdcdc",
+    "montée": "#f6b26b",
+    "plateau": "#e06666",
+    "descente": "#9fc5e8",
+    "durée indiquée": "#b4a7d6",
+    "durée documentée": "#b4a7d6",
+}
+PHASE_RANKS = {
+    "latence": 1, "montée": 2, "durée indiquée": 2, "durée documentée": 2,
+    "descente": 3, "plateau": 4,
+}
+PHASE_SYMBOL = {
+    "latence": "◌", "montée": "↗", "plateau": "●", "descente": "↘",
+    "durée indiquée": "•", "durée documentée": "•",
+}
+
+
+def _fmt_heure(moment: datetime) -> str:
+    return moment.strftime("%H:%M")
+
+
+def _fmt_duree(minutes) -> str:
+    """Forme courte d'une duree en minutes : « 12 h », « 90 min »."""
+    try:
+        minutes = float(minutes or 0)
+    except (TypeError, ValueError):
+        return "?"
+    if not minutes:
+        return "?"
+    if minutes >= 60:
+        text = f"{minutes / 60.0:.1f}".rstrip("0").rstrip(".")
+        return f"{text} h"
+    return f"{minutes:.0f} min"
+
+
+def _fmt_date_longue(iso: str) -> str:
+    """« 2026-05-12T21:30 » -> « mardi 12 mai 2026 à 21:30 »."""
+    try:
+        moment = datetime.fromisoformat(str(iso))
+    except ValueError:
+        return str(iso)
+    return (f"{JOURS_FR[moment.weekday()]} {moment.day} "
+            f"{MOIS_FR[moment.month - 1]} {moment.year} à "
+            f"{moment.strftime('%H:%M')}")
+
+
+class ClickableFrame(QFrame):
+    """Cadre cliquable (cellule de calendrier)."""
+
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - API Qt
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class DayTimeline(QWidget):
+    """Frise 0 h - 24 h d'une journee : un bloc colore par phase d'effet.
+
+    Les blocs d'une prise qui deborde de la journee (prise de la veille,
+    effet qui passe minuit) sont tronques au cadre.
+    """
+
+    HOUR_HEIGHT = 30
+    LEFT = 48
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.day = QDate.currentDate()
+        # (phase, debut, fin, molecule) en datetime local
+        self.blocks: list[tuple[str, datetime, datetime, str]] = []
+        self.setMinimumWidth(330)
+        self.setMinimumHeight(self.HOUR_HEIGHT * 25)
+
+    def set_day_blocks(self, day: QDate, blocks) -> None:
+        self.day = QDate(day)
+        self.blocks = list(blocks)
+        self.update()
+
+    def _y(self, moment: datetime) -> float:
+        start = datetime(self.day.year(), self.day.month(), self.day.day())
+        minutes = (moment - start).total_seconds() / 60.0
+        return minutes / 60.0 * self.HOUR_HEIGHT
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+        font = QFont(painter.font())
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
+        painter.setFont(font)
+        total_height = self.HOUR_HEIGHT * 24
+        for hour in range(25):
+            y = hour * self.HOUR_HEIGHT
+            painter.setPen(QPen(QColor("#e6e6e6" if hour % 2 else "#c8c8c8")))
+            painter.drawLine(self.LEFT, int(y), self.width() - 6, int(y))
+            if hour < 24:
+                painter.setPen(QPen(QColor("#666666")))
+                painter.drawText(4, int(y) + self.HOUR_HEIGHT // 2 + 4,
+                                 f"{hour:02d}:00")
+        painter.setPen(QPen(QColor("#c8c8c8")))
+        painter.drawLine(self.LEFT, 0, self.LEFT, total_height)
+        for phase, begin, end, molecule in self.blocks:
+            y1 = max(0.0, self._y(begin))
+            y2 = min(float(total_height), self._y(end))
+            if y2 - y1 < 1.5:
+                y2 = y1 + 1.5
+            rect = QRectF(self.LEFT + 2, y1,
+                          self.width() - self.LEFT - 10, y2 - y1)
+            painter.fillRect(rect, QColor(PHASE_COLORS.get(phase, "#cccccc")))
+            if rect.height() >= 13:
+                painter.setPen(QPen(QColor("#333333")))
+                text = (f"{PHASE_SYMBOL.get(phase, '•')} {phase} "
+                        f"{_fmt_heure(begin)}–{_fmt_heure(end)}")
+                if rect.height() >= 28 and molecule:
+                    text += f" — {molecule}"
+                painter.drawText(rect.adjusted(4, 0, -4, 0),
+                                 Qt.AlignVCenter | Qt.AlignLeft, text)
+        painter.end()
+
+
+class CalendarEntryDialog(QDialog):
+    """Saisie d'une prise : molecule, date, heure, dose, duree, note.
+
+    La dose est un texte libre : l'outil ne propose aucune posologie.
+    """
+
+    def __init__(self, parent, entry=None, suggestions=(),
+                 timeline: Optional[dict] = None):
+        super().__init__(parent)
+        entry = sb.normalise_entry(entry or {})
+        self.setWindowTitle(
+            "Modifier la prise" if entry["start"] else "Ajouter une prise"
+        )
+        self.setMinimumWidth(540)
+
+        start = None
+        if entry["start"]:
+            try:
+                start = datetime.fromisoformat(entry["start"])
+            except ValueError:
+                start = None
+        if start is None:
+            start = datetime.now().replace(second=0, microsecond=0)
+
+        form = QFormLayout()
+        self.molecule_combo = QComboBox(self)
+        self.molecule_combo.setEditable(True)
+        known = sorted({str(s).strip() for s in (suggestions or ())
+                        if str(s).strip()}, key=str.casefold)
+        self.molecule_combo.addItems(known)
+        self.molecule_combo.setCurrentText(entry["molecule"])
+        completer = QCompleter(known, self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        self.molecule_combo.setCompleter(completer)
+        form.addRow("Molécule :", self.molecule_combo)
+
+        self.date_edit = QDateEdit(QDate(start.year, start.month, start.day),
+                                   self)
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("dd/MM/yyyy")
+        form.addRow("Date :", self.date_edit)
+
+        self.time_edit = QTimeEdit(QTime(start.hour, start.minute), self)
+        self.time_edit.setDisplayFormat("HH:mm")
+        form.addRow("Heure :", self.time_edit)
+
+        self.dose_edit = QLineEdit(entry["dose"], self)
+        self.dose_edit.setPlaceholderText(
+            "ce que vous avez noté (ex. « 1 buvard », « 100 µg »)"
+        )
+        form.addRow("Dose :", self.dose_edit)
+
+        self.duree_spin = QSpinBox(self)
+        self.duree_spin.setRange(0, 7 * 24 * 60)
+        self.duree_spin.setSingleStep(15)
+        self.duree_spin.setSuffix(" min")
+        self.duree_spin.setSpecialValueText("auto (durées de la molécule)")
+        self.duree_spin.setValue(int(entry["duree_min"] or 0))
+        form.addRow("Durée d'effet :", self.duree_spin)
+
+        self.note_edit = QLineEdit(entry["note"], self)
+        self.note_edit.setPlaceholderText("contexte, ressenti… (facultatif)")
+        form.addRow("Note :", self.note_edit)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        total = sb.influence_end_minutes(timeline)
+        info = QLabel(self)
+        info.setWordWrap(True)
+        info.setText(
+            "Journal personnel : aucune posologie n'est proposée. La période "
+            "d'effet affichée dans le calendrier est une <b>estimation</b> "
+            "calculée à partir des durées documentées de la molécule "
+            "(apparition, montée, pic, descente)"
+            + (f" — ici environ {_fmt_duree(total)}." if total else
+               " ; laissez « auto », ou saisissez une durée si vous la "
+               "connaissez.")
+            + " Ce n'est pas une donnée médicale."
+        )
+        info.setStyleSheet("color:#666;")
+        layout.addWidget(info)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self
+        )
+        buttons.button(QDialogButtonBox.Ok).setText("Enregistrer")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def result_entry(self) -> dict:
+        moment = datetime(
+            self.date_edit.date().year(), self.date_edit.date().month(),
+            self.date_edit.date().day(), self.time_edit.time().hour(),
+            self.time_edit.time().minute(),
+        )
+        return sb.normalise_entry({
+            "molecule": self.molecule_combo.currentText(),
+            "start": moment.strftime("%Y-%m-%dT%H:%M"),
+            "dose": self.dose_edit.text(),
+            "note": self.note_edit.text(),
+            "duree_min": self.duree_spin.value(),
+        })
+
+    @staticmethod
+    def ask(parent, entry=None, suggestions=(), timeline=None):
+        """Entree saisie (dict), ou None si l'utilisateur annule."""
+        dialog = CalendarEntryDialog(parent, entry, suggestions, timeline)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        result = dialog.result_entry()
+        if not result["molecule"] or not result["start"]:
+            return None
+        return result
+
+
+class CalendarPane(QWidget):
+    """Calendrier du journal des prises : vues annee, mois et jour.
+
+    Une prise = molécule + date/heure + dose (texte libre). Chaque prise
+    est représentée avec la période d'effet estimée d'apres les durees
+    documentees de la molécule (`studio_backend.molecule_timeline`), ou une
+    duree saisie a la main. Aucun conseil, aucune posologie proposee.
+    """
+
+    addRequested = Signal()
+    editRequested = Signal(object)
+    removeRequested = Signal(object)
+    refreshRequested = Signal()
+    pathDropped = Signal(object)
+
+    ZOOMS = ("Année", "Mois", "Jour")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.entries: list[dict] = []
+        self.timelines: dict[str, dict] = {}
+        today = QDate.currentDate()
+        self.mode = "Mois"
+        self.year = today.year()
+        self.month = today.month()
+        self.day = today
+        self._computed: list[tuple[dict, datetime, list]] = []
+        self._day_colors: dict = {}
+        self._day_ranks: dict = {}
+        self._day_counts: dict = {}
+
+        bar = QToolBar(self)
+        bar.setIconSize(QSize(16, 16))
+        previous = QAction("◀", self)
+        previous.setToolTip("Période précédente")
+        previous.triggered.connect(self._previous)
+        bar.addAction(previous)
+        today_action = QAction("Aujourd'hui", self)
+        today_action.triggered.connect(self._go_today)
+        bar.addAction(today_action)
+        nxt = QAction("▶", self)
+        nxt.setToolTip("Période suivante")
+        nxt.triggered.connect(self._next)
+        bar.addAction(nxt)
+        self.title = QLabel("", self)
+        self.title.setStyleSheet("font-weight:bold;")
+        self.title.setMinimumWidth(200)
+        bar.addWidget(self.title)
+        bar.addSeparator()
+        bar.addAction("Ajouter une prise…").triggered.connect(self.addRequested)
+        refresh = QAction(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload),
+            "Actualiser", self,
+        )
+        refresh.setToolTip("Relit le journal et les durées documentées.")
+        refresh.triggered.connect(self.refreshRequested)
+        bar.addAction(refresh)
+        bar.addSeparator()
+        bar.addWidget(QLabel("Vue :", self))
+        self.zoom = QComboBox(self)
+        self.zoom.addItems(self.ZOOMS)
+        self.zoom.setCurrentText(self.mode)
+        self.zoom.currentTextChanged.connect(self._set_mode)
+        bar.addWidget(self.zoom)
+
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(bar)
+        layout.addWidget(self.scroll, 1)
+        self._rebuild()
+
+    # -- donnees -----------------------------------------------------------
+    @staticmethod
+    def molecule_key(name) -> str:
+        """Cle de rapprochement d'un nom de molecule (casse/accents ignores)."""
+        return rm.fold_accents(str(name or "")).casefold().strip()
+
+    @staticmethod
+    def _parse_start(entry) -> Optional[datetime]:
+        try:
+            return datetime.fromisoformat(str(entry.get("start") or ""))
+        except ValueError:
+            return None
+
+    def set_entries(self, entries) -> None:
+        clean = [sb.normalise_entry(e) for e in (entries or [])]
+        self.entries = [e for e in clean if e["molecule"] and e["start"]]
+        self._rebuild()
+
+    def set_timelines(self, timelines) -> None:
+        """{cle de molecule: timeline} (voir studio_backend.molecule_timeline)."""
+        self.timelines = dict(timelines or {})
+        self._rebuild()
+
+    def current_day(self) -> QDate:
+        return QDate(self.day)
+
+    def show_date(self, day: QDate) -> None:
+        """Place la vue sur un jour (sans changer de niveau)."""
+        self.day = QDate(day)
+        self.year = self.day.year()
+        self.month = self.day.month()
+        self._rebuild()
+
+    def _compute(self) -> None:
+        computed = []
+        for entry in self.entries:
+            start = self._parse_start(entry)
+            if start is None:
+                continue
+            timeline = self.timelines.get(self.molecule_key(entry["molecule"]))
+            segments = [
+                (phase, start + timedelta(minutes=begin),
+                 start + timedelta(minutes=end))
+                for phase, begin, end in
+                sb.influence_segments(timeline, entry.get("duree_min"))
+            ]
+            computed.append((entry, start, segments))
+        self._computed = computed
+
+    def _recompute_days(self) -> None:
+        self._day_colors = {}
+        self._day_ranks = {}
+        self._day_counts = {}
+        for entry, start, segments in self._computed:
+            day = start.date()
+            self._day_counts[day] = self._day_counts.get(day, 0) + 1
+            for phase, begin, finish in segments:
+                rank = PHASE_RANKS.get(phase, 1)
+                last = (finish - timedelta(microseconds=1)).date()
+                cursor = begin.date()
+                while cursor <= last:
+                    if rank > self._day_ranks.get(cursor, 0):
+                        self._day_ranks[cursor] = rank
+                        self._day_colors[cursor] = PHASE_COLORS.get(phase, "")
+                    cursor += timedelta(days=1)
+
+    def _day_color(self, day: QDate) -> str:
+        return self._day_colors.get(day.toPython(), "")
+
+    def _blocks_of_day(self, day: QDate) -> list:
+        begin_day = datetime(day.year(), day.month(), day.day())
+        end_day = begin_day + timedelta(days=1)
+        out = []
+        for entry, start, segments in self._computed:
+            for phase, begin, finish in segments:
+                if begin < end_day and finish > begin_day:
+                    out.append((phase, begin, finish, entry["molecule"]))
+        return out
+
+    def _entries_of_day(self, day: QDate) -> list[dict]:
+        key = day.toPython()
+        return [entry for entry, start, _ in self._computed
+                if start.date() == key]
+
+    def _entry_short(self, entry: dict) -> str:
+        start = self._parse_start(entry)
+        text = f"{_fmt_heure(start)} {entry['molecule']}" if start else entry["molecule"]
+        if entry["dose"]:
+            text += f" {entry['dose']}"
+        return text if len(text) <= 30 else text[:29] + "…"
+
+    # -- navigation --------------------------------------------------------
+    def _period_label(self) -> str:
+        if self.mode == "Année":
+            return str(self.year)
+        if self.mode == "Jour":
+            return (f"{self.day.day()} {MOIS_FR[self.day.month() - 1]} "
+                    f"{self.day.year()}")
+        return f"{MOIS_FR[self.month - 1]} {self.year}"
+
+    def _set_mode(self, mode: str) -> None:
+        if mode not in self.ZOOMS or mode == self.mode:
+            return
+        self.mode = mode
+        if mode == "Jour":
+            self.day = QDate(self.year, self.month, min(self.day.day(),
+                                                        QDate(self.year, self.month, 1).daysInMonth()))
+            self.year, self.month = self.day.year(), self.day.month()
+        self._rebuild()
+
+    def _previous(self) -> None:
+        if self.mode == "Année":
+            self.year -= 1
+        elif self.mode == "Mois":
+            self._shift_month(-1)
+        else:
+            self.day = self.day.addDays(-1)
+            self.year, self.month = self.day.year(), self.day.month()
+        self._rebuild()
+
+    def _next(self) -> None:
+        if self.mode == "Année":
+            self.year += 1
+        elif self.mode == "Mois":
+            self._shift_month(1)
+        else:
+            self.day = self.day.addDays(1)
+            self.year, self.month = self.day.year(), self.day.month()
+        self._rebuild()
+
+    def _shift_month(self, delta: int) -> None:
+        self.month += delta
+        while self.month > 12:
+            self.month -= 12
+            self.year += 1
+        while self.month < 1:
+            self.month += 12
+            self.year -= 1
+
+    def _go_today(self) -> None:
+        today = QDate.currentDate()
+        self.year, self.month, self.day = (today.year(), today.month(), today)
+        self._rebuild()
+
+    def _open_day(self, day: QDate) -> None:
+        self.day = QDate(day)
+        self.year, self.month = self.day.year(), self.day.month()
+        self.mode = "Jour"
+        self.zoom.setCurrentText(self.mode)
+        self._rebuild()
+
+    def _open_month(self, year: int, month: int) -> None:
+        self.year, self.month = year, month
+        self.mode = "Mois"
+        self.zoom.setCurrentText(self.mode)
+        self._rebuild()
+
+    # -- vues --------------------------------------------------------------
+    def _rebuild(self) -> None:
+        self._compute()
+        self._recompute_days()
+        self.title.setText(self._period_label())
+        if self.mode == "Année":
+            body = self._build_year()
+        elif self.mode == "Jour":
+            body = self._build_day(self.day)
+        else:
+            body = self._build_month(self.year, self.month)
+        self._set_body(body)
+
+    def _set_body(self, widget: QWidget) -> None:
+        old = self.scroll.takeWidget()
+        if old is not None:
+            old.deleteLater()
+        self.scroll.setWidget(widget)
+
+    def _legend(self) -> QWidget:
+        box = QWidget(self)
+        layout = QHBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        for phase in ("latence", "montée", "plateau", "descente"):
+            label = QLabel(f"■ {phase}", box)
+            label.setStyleSheet(f"color:{PHASE_COLORS[phase]}; font-size:11px;")
+            layout.addWidget(label)
+        note = QLabel("effet estimé (durées documentées)", box)
+        note.setStyleSheet("color:#888; font-size:11px;")
+        layout.addWidget(note)
+        layout.addStretch(1)
+        return box
+
+    def _build_year(self) -> QWidget:
+        box = QWidget(self)
+        layout = QVBoxLayout(box)
+        layout.addWidget(self._legend())
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        for index in range(12):
+            grid.addWidget(self._mini_month(self.year, index + 1),
+                           index // 4, index % 4)
+        layout.addLayout(grid)
+        layout.addStretch(1)
+        return box
+
+    def _mini_month(self, year: int, month: int) -> QWidget:
+        box = QWidget(self)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(2)
+        title = QToolButton(box)
+        title.setText(f"{MOIS_FR[month - 1]} {year}")
+        title.setAutoRaise(True)
+        title.setStyleSheet("font-weight:bold;")
+        title.setToolTip("Ouvrir le mois")
+        title.clicked.connect(lambda: self._open_month(year, month))
+        layout.addWidget(title, 0, Qt.AlignLeft)
+        grid = QGridLayout()
+        grid.setSpacing(1)
+        for column, name in enumerate(JOURS_COURT_FR):
+            label = QLabel(name, box)
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet("color:#999; font-size:9px;")
+            grid.addWidget(label, 0, column)
+        first = QDate(year, month, 1)
+        row, column = 1, first.dayOfWeek() - 1
+        for day_number in range(1, first.daysInMonth() + 1):
+            day = QDate(year, month, day_number)
+            button = QToolButton(box)
+            button.setText(str(day_number))
+            button.setFixedSize(24, 21)
+            button.setAutoRaise(True)
+            color = self._day_color(day)
+            tooltip = f"{day_number} {MOIS_FR[month - 1]} {year}"
+            count = self._day_counts.get(day.toPython(), 0)
+            if count:
+                tooltip += f" — {count} prise(s)"
+            if color:
+                button.setStyleSheet(
+                    f"background-color:{color}; border:1px solid #c0c0c0;"
+                )
+            button.setToolTip(tooltip)
+            button.clicked.connect(lambda _=False, d=day: self._open_day(d))
+            grid.addWidget(button, row, column)
+            column += 1
+            if column > 6:
+                column = 0
+                row += 1
+        layout.addLayout(grid)
+        return box
+
+    def _build_month(self, year: int, month: int) -> QWidget:
+        box = QWidget(self)
+        layout = QVBoxLayout(box)
+        head = QWidget(box)
+        head_layout = QHBoxLayout(head)
+        head_layout.setContentsMargins(0, 0, 0, 0)
+        title = QLabel(f"{MOIS_FR[month - 1]} {year}", head)
+        title.setStyleSheet("font-weight:bold;")
+        head_layout.addWidget(title)
+        head_layout.addStretch(1)
+        head_layout.addWidget(self._legend())
+        layout.addWidget(head)
+        grid = QGridLayout()
+        grid.setSpacing(3)
+        for column, name in enumerate(JOURS_COURT_FR):
+            label = QLabel(name, box)
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet("color:#777; font-size:11px; font-weight:bold;")
+            grid.addWidget(label, 0, column)
+        first = QDate(year, month, 1)
+        start_cell = first.addDays(-(first.dayOfWeek() - 1))
+        for week in range(6):
+            for column in range(7):
+                day = start_cell.addDays(week * 7 + column)
+                grid.addWidget(
+                    self._month_cell(day, day.month() == month),
+                    week + 1, column,
+                )
+        layout.addLayout(grid, 1)
+        return box
+
+    def _month_cell(self, day: QDate, in_month: bool) -> ClickableFrame:
+        cell = ClickableFrame(self)
+        cell.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        cell.setMinimumHeight(74)
+        color = self._day_color(day)
+        if color:
+            style = f"border:1px solid #c0c0c0; background-color:{color};"
+        elif in_month:
+            style = "border:1px solid #e4e4e4; background-color:#ffffff;"
+        else:
+            style = "border:1px solid #f0f0f0; background-color:#fafafa;"
+        cell.setStyleSheet(style)
+        layout = QVBoxLayout(cell)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(0)
+        entries = self._entries_of_day(day)
+        head = QLabel(
+            f"{day.day()}" + (f"  ({len(entries)})" if entries else ""), cell
+        )
+        head.setStyleSheet(
+            f"font-weight:bold; color:{'#333333' if in_month else '#b0b0b0'};"
+        )
+        layout.addWidget(head)
+        for entry in entries[:2]:
+            line = QLabel(self._entry_short(entry), cell)
+            line.setStyleSheet(
+                f"font-size:10px; color:{'#222222' if in_month else '#999999'};"
+            )
+            layout.addWidget(line)
+        if len(entries) > 2:
+            more = QLabel(f"+{len(entries) - 2}", cell)
+            more.setStyleSheet("font-size:10px; color:#666666;")
+            layout.addWidget(more)
+        layout.addStretch(1)
+        tooltip = _fmt_date_longue(
+            f"{day.year():04d}-{day.month():02d}-{day.day():02d}T00:00"
+        )
+        if entries:
+            tooltip += "\n" + "\n".join(
+                f"{_fmt_heure(self._parse_start(e))} — {e['molecule']}"
+                + (f" — {e['dose']}" if e["dose"] else "")
+                for e in entries if self._parse_start(e)
+            )
+        cell.setToolTip(tooltip)
+        cell.clicked.connect(lambda d=QDate(day): self._open_day(d))
+        return cell
+
+    def _build_day(self, day: QDate) -> QWidget:
+        box = QWidget(self)
+        layout = QVBoxLayout(box)
+        title = QLabel(
+            f"{JOURS_FR[day.dayOfWeek() - 1]} {day.day()} "
+            f"{MOIS_FR[day.month() - 1]} {day.year()}", box
+        )
+        title.setStyleSheet("font-weight:bold;")
+        layout.addWidget(title)
+        layout.addWidget(self._legend())
+        row = QHBoxLayout()
+        timeline = DayTimeline(box)
+        timeline.set_day_blocks(day, self._blocks_of_day(day))
+        row.addWidget(timeline, 0)
+        side = QVBoxLayout()
+        side.addWidget(QLabel("Prises du jour", box))
+        self.day_list = QListWidget(box)
+        self.day_list.itemDoubleClicked.connect(self._edit_item)
+        self.day_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.day_list.customContextMenuRequested.connect(self._day_menu)
+        for entry in self._entries_of_day(day):
+            item = QListWidgetItem(self._entry_label(entry), self.day_list)
+            item.setData(Qt.UserRole, entry)
+            item.setToolTip(self._entry_tooltip(entry))
+            self.day_list.addItem(item)
+        side.addWidget(self.day_list, 1)
+        buttons = QHBoxLayout()
+        add = QPushButton("Ajouter une prise…", box)
+        add.clicked.connect(self.addRequested)
+        edit = QPushButton("Modifier…", box)
+        edit.clicked.connect(self._edit_selected)
+        remove = QPushButton("Supprimer", box)
+        remove.clicked.connect(self._remove_selected)
+        buttons.addWidget(add)
+        buttons.addWidget(edit)
+        buttons.addWidget(remove)
+        buttons.addStretch(1)
+        side.addLayout(buttons)
+        row.addLayout(side, 1)
+        layout.addLayout(row, 1)
+        return box
+
+    def _entry_label(self, entry: dict) -> str:
+        start = self._parse_start(entry)
+        text = f"{_fmt_heure(start)} — {entry['molecule']}" if start else entry["molecule"]
+        if entry["dose"]:
+            text += f" — {entry['dose']}"
+        timeline = self.timelines.get(self.molecule_key(entry["molecule"]))
+        total = entry["duree_min"] or sb.influence_end_minutes(timeline)
+        return f"{text}   ({_fmt_duree(total)} sous influence)"
+
+    def _entry_tooltip(self, entry: dict) -> str:
+        start = self._parse_start(entry)
+        lines = [_fmt_date_longue(entry["start"])] if start else [entry["start"]]
+        if entry["dose"]:
+            lines.append(f"Dose notée : {entry['dose']}")
+        if entry["note"]:
+            lines.append(f"Note : {entry['note']}")
+        timeline = self.timelines.get(self.molecule_key(entry["molecule"]))
+        segments = sb.influence_segments(timeline, entry.get("duree_min"))
+        if segments and start:
+            lines.append("Période estimée :")
+            for phase, begin, end in segments:
+                lines.append(
+                    f"  {phase} {_fmt_heure(start + timedelta(minutes=begin))}"
+                    f"–{_fmt_heure(start + timedelta(minutes=end))}"
+                )
+        else:
+            lines.append("Durées documentées indisponibles pour cette molécule.")
+        lines.append("Estimation à partir des durées documentées — pas une "
+                     "donnée médicale.")
+        return "\n".join(lines)
+
+    def _day_menu(self, position) -> None:
+        item = self.day_list.itemAt(position)
+        if item is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Modifier…").triggered.connect(
+            lambda: self._edit_item(item)
+        )
+        menu.addAction("Supprimer").triggered.connect(
+            lambda: self._remove_item(item)
+        )
+        menu.exec(self.day_list.viewport().mapToGlobal(position))
+
+    def _edit_item(self, item) -> None:
+        entry = item.data(Qt.UserRole) if item is not None else None
+        if entry:
+            self.editRequested.emit(entry)
+
+    def _edit_selected(self) -> None:
+        self._edit_item(self.day_list.currentItem())
+
+    def _remove_item(self, item) -> None:
+        entry = item.data(Qt.UserRole) if item is not None else None
+        if entry:
+            self.removeRequested.emit(entry)
+
+    def _remove_selected(self) -> None:
+        self._remove_item(self.day_list.currentItem())
+
+    # -- glisser-deposer ---------------------------------------------------
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - API Qt
+        if event.mimeData().hasFormat(PATH_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802 - API Qt
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - API Qt
+        mime = event.mimeData()
+        if not mime.hasFormat(PATH_MIME):
+            event.ignore()
+            return
+        try:
+            path = bytes(mime.data(PATH_MIME)).decode("utf-8").strip()
+        except UnicodeDecodeError:
+            event.ignore()
+            return
+        if path:
+            self.pathDropped.emit(Path(path))
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
 class MainWindow(QMainWindow):
     """Les trois volets : explorateur, lecteur PDF, resume."""
 
@@ -2498,7 +3294,24 @@ class MainWindow(QMainWindow):
         self.interactions_splitter.setSizes([340, 940])
         self.pages.addTab(self.interactions_splitter, "Interactions")
 
-        # non fermables : trois onglets permanents, comme des modes de la fenetre
+        # page « Calendrier » : journal personnel des prises (molecule,
+        # date/heure, dose) et periode d'effet estimee. Aucun acces reseau,
+        # aucune posologie proposee.
+        self._calendar_entries: list[dict] | None = None
+        self.calendar = CalendarPane(self)
+        self.calendar.addRequested.connect(self._calendar_add_dialog)
+        self.calendar.editRequested.connect(self._calendar_edit_dialog)
+        self.calendar.removeRequested.connect(self._calendar_remove)
+        self.calendar.refreshRequested.connect(self._calendar_activate)
+        self.calendar.pathDropped.connect(self._calendar_add_from_tree)
+        self.calendar_splitter = QSplitter(Qt.Horizontal, self)
+        self.calendar_splitter.addWidget(self.calendar)
+        self.calendar_splitter.setStretchFactor(0, 1)
+        self.calendar_splitter.setStretchFactor(1, 3)
+        self.calendar_splitter.setSizes([340, 960])
+        self.pages.addTab(self.calendar_splitter, "Calendrier")
+
+        # non fermables : quatre onglets permanents, comme des modes de la fenetre
         self.pages.currentChanged.connect(self._page_changed)
         self.setCentralWidget(self.pages)
 
@@ -2593,6 +3406,10 @@ class MainWindow(QMainWindow):
         page_inter.setShortcut("Ctrl+3")
         page_inter.triggered.connect(lambda: self.show_page(2))
         view_menu.addAction(page_inter)
+        page_cal = QAction("Page Calendrier", self)
+        page_cal.setShortcut("Ctrl+4")
+        page_cal.triggered.connect(lambda: self.show_page(3))
+        view_menu.addAction(page_cal)
 
         help_menu = self.menuBar().addMenu("&Aide")
         about = QAction("À propos", self)
@@ -3205,6 +4022,127 @@ class MainWindow(QMainWindow):
         if isinstance(widget, DocumentPane):
             widget.focus_search()
 
+    # -- calendrier des prises -------------------------------------------
+    def _calendar_items(self) -> list[dict]:
+        """Journal des prises (lu une fois, puis garde en memoire)."""
+        if self._calendar_entries is None:
+            self._calendar_entries = sb.load_calendar()
+        return self._calendar_entries
+
+    def _calendar_suggestions(self) -> list[str]:
+        """Noms proposes : molecules du travail + noms deja utilises."""
+        names = {str(e["molecule"]) for e in self._calendar_items()
+                 if e.get("molecule")}
+        if self.root is not None:
+            for entry in sb.molecule_catalogue(self.root):
+                if entry.get("name"):
+                    names.add(str(entry["name"]))
+        return sorted(names, key=str.casefold)
+
+    def _calendar_timelines(self) -> dict[str, dict]:
+        """Durées documentées de chaque molécule du journal, par clé de nom."""
+        timelines: dict[str, dict] = {}
+        for entry in self._calendar_items():
+            name = entry["molecule"]
+            key = CalendarPane.molecule_key(name)
+            if key in timelines:
+                continue
+            directory = (sb.find_molecule_dir(self.root, name)
+                         if self.root is not None else None)
+            timelines[key] = sb.molecule_timeline(directory)
+        return timelines
+
+    def _calendar_refresh_view(self) -> None:
+        self.calendar.set_timelines(self._calendar_timelines())
+        self.calendar.set_entries(self._calendar_items())
+
+    def _calendar_activate(self) -> None:
+        """Recharge le journal depuis le disque a l'ouverture de la page."""
+        self._calendar_entries = sb.load_calendar()
+        self._calendar_refresh_view()
+
+    def _calendar_store(self) -> None:
+        """Ecrit le journal sur le disque et met la vue a jour."""
+        sb.save_calendar(self._calendar_items())
+        self._calendar_refresh_view()
+
+    def _calendar_add_dialog(self, prefill=None) -> None:
+        entry = sb.normalise_entry(prefill or {})
+        if not entry["start"]:
+            day = self.calendar.current_day()
+            now = datetime.now()
+            entry["start"] = datetime(
+                day.year(), day.month(), day.day(), now.hour, now.minute
+            ).strftime("%Y-%m-%dT%H:%M")
+        timeline = self._calendar_timelines().get(
+            CalendarPane.molecule_key(entry["molecule"])
+        )
+        result = CalendarEntryDialog.ask(
+            self, entry, self._calendar_suggestions(), timeline
+        )
+        if result is None:
+            return
+        result = sb.normalise_entry(result)
+        self._calendar_items().append(result)
+        self._calendar_store()
+        try:
+            moment = datetime.fromisoformat(result["start"])
+        except ValueError:
+            return
+        self.calendar.show_date(QDate(moment.year, moment.month, moment.day))
+
+    def _calendar_edit_dialog(self, entry) -> None:
+        entry = sb.normalise_entry(entry)
+        items = self._calendar_items()
+        try:
+            index = items.index(entry)
+        except ValueError:
+            return
+        timeline = self._calendar_timelines().get(
+            CalendarPane.molecule_key(entry["molecule"])
+        )
+        result = CalendarEntryDialog.ask(
+            self, entry, self._calendar_suggestions(), timeline
+        )
+        if result is None:
+            return
+        items[index] = sb.normalise_entry(result)
+        self._calendar_store()
+
+    def _calendar_remove(self, entry) -> None:
+        entry = sb.normalise_entry(entry)
+        answer = QMessageBox.question(
+            self, "Supprimer la prise",
+            f"Supprimer la prise « {entry['molecule']} » du "
+            f"{_fmt_date_longue(entry['start'])} ?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self._calendar_items().remove(entry)
+        except ValueError:
+            return
+        self._calendar_store()
+
+    def _calendar_add_from_tree(self, path) -> None:
+        """Depot d'un dossier/fichier de molecule : nouvelle prise pre-remplie."""
+        path = Path(path)
+        name = ""
+        if path.is_dir():
+            if sb.is_workspace_root(path, self.root):
+                return
+            name = sb.read_molecule_meta(path)
+            if not name and sb.has_resume(path):
+                name = sb.resume_molecule_name(path)
+            name = name or path.name
+        elif path.is_file() and self.root is not None:
+            _directory, name = sb.locate_molecule(path, self.root)
+        if not name:
+            return
+        self.show_page(3)
+        self._calendar_add_dialog({"molecule": name})
+
     # -- fermeture -------------------------------------------------------
     def closeEvent(self, event) -> None:  # noqa: N802 - API Qt
         # revenir sur la page Recherche pour que l'explorateur soit de
@@ -3218,8 +4156,9 @@ class MainWindow(QMainWindow):
 
     # -- bascule entre pages ----------------------------------------------
     def show_page(self, index: int) -> None:
-        """Bascule entre Recherche (0), Comparaison (1) et Interactions (2)."""
-        self.pages.setCurrentIndex(max(0, min(int(index), 2)))
+        """Bascule entre Recherche (0), Comparaison (1), Interactions (2)
+        et Calendrier (3)."""
+        self.pages.setCurrentIndex(max(0, min(int(index), 3)))
 
     def _page_changed(self, index: int) -> None:
         """Un seul explorateur : il est deplace dans la page active.
@@ -3228,9 +4167,10 @@ class MainWindow(QMainWindow):
         widget dans l'autre splitter le reparente (l'ancien splitter le perd
         de lui-meme).
         """
-        if index in (1, 2):
-            target = (self.compare_splitter if index == 1
-                      else self.interactions_splitter)
+        if index in (1, 2, 3):
+            target = {1: self.compare_splitter,
+                      2: self.interactions_splitter,
+                      3: self.calendar_splitter}[index]
             if self.workspace.parent() is not target:
                 if self.workspace.parent() is self.splitter:
                     self._research_sizes = self.splitter.sizes()
@@ -3239,8 +4179,10 @@ class MainWindow(QMainWindow):
             self.workspace.setVisible(self.toggle_left.isChecked())
             if index == 1:
                 self._compare_activate()
-            else:
+            elif index == 2:
                 self._interactions_activate()
+            else:
+                self._calendar_activate()
         else:
             if self.workspace.parent() is not self.splitter:
                 self.splitter.insertWidget(0, self.workspace)

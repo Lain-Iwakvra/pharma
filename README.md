@@ -147,9 +147,9 @@ python3 pharma_studio.py --workspace ~/pharma
 Au premier lancement, une boîte de dialogue demande le **répertoire de
 travail** ; il est mémorisé pour les fois suivantes (`QSettings`).
 
-La fenêtre comporte trois pages, conservées en haut (`Ctrl+1`, `Ctrl+2`,
-`Ctrl+3`) : **Recherche** (les trois volets ci-dessus), **Comparaison** et
-**Interactions** — voir les sections correspondantes plus bas.
+La fenêtre comporte quatre pages, conservées en haut (`Ctrl+1` à `Ctrl+4`) :
+**Recherche** (les trois volets ci-dessus), **Comparaison**, **Interactions**
+et **Calendrier** — voir les sections correspondantes plus bas.
 
 ### Organisation du répertoire de travail
 
@@ -443,6 +443,43 @@ Fonctionnement :
 * La liste des molécules est conservée au redémarrage (`QSettings`) ; la
   base DDInter n'est jamais téléchargée sans action explicite.
 
+### Page « Calendrier »
+
+Un **journal personnel des prises** : molécule, date et heure, dose (texte
+libre). L'outil n'enregistre que ce que l'utilisateur saisit — **aucune
+posologie n'est proposée** — et représente la **période d'effet estimée**
+après chaque prise.
+
+* **Trois niveaux de vue**, comme un agenda : **Année** (12 mini-mois),
+  **Mois** (grille des jours) et **Jour** (frise 0 h–24 h). On passe de l'un
+  à l'autre en cliquant un jour ou le nom d'un mois, ou par la liste
+  *Vue :* ; les flèches `◀ ▶` reculent ou avancent d'une année, d'un mois ou
+  d'un jour selon le niveau, et *Aujourd'hui* revient à la date du jour.
+* **« Ajouter une prise… »** demande la molécule (autocomplétion sur les
+  molécules du travail et les noms déjà saisis), la date, l'heure, la dose
+  (texte libre) et une note facultative. Dans la vue Jour, double-clic ou
+  menu contextuel pour **modifier** ou **supprimer** une prise.
+* **Période sous influence** : pour chaque prise, la frise colorie les phases
+  estimées à partir des **durées documentées** de la molécule lues dans
+  `resume.json` — `onset` (temps d'apparition, « latence »), `comeup`
+  (« montée »), `peak` (« plateau ») et `offset` (« descente »). Exemple :
+  pour le LSD, une prise à 21 h 30 couvre environ 12 h, réparties en ces
+  quatre phases. Le champ *Durée d'effet* du dialogue permet de saisir une
+  autre durée, sinon « auto » utilise ces données.
+* Une prise dont l'effet dépasse minuit **teinte le lendemain** dans les
+  vues Année et Mois ; la vue Jour reprend la suite du bloc.
+* Le journal est un fichier JSON versionné
+  (`$XDG_DATA_HOME/pharma/calendrier.json`, soit
+  `~/.local/share/pharma/calendrier.json`), indépendant du répertoire de
+  travail, lisible et éditable à la main. Le bouton *Actualiser* relit le
+  fichier et les durées documentées.
+* **Glisser-déposer** : déposer un dossier ou fichier de molécule de
+  l'explorateur sur le calendrier ouvre le dialogue de saisie pré-rempli.
+
+> La période affichée est une **estimation documentaire** (durées issues de
+> PsychonautWiki / Wikipedia) : ce n'est ni une donnée médicale, ni une
+> indication de conduite à tenir.
+
 ### Enregistrer et charger les tableaux
 
 Les tableaux **Comparaison** et **Interactions** peuvent être conservés dans
@@ -474,6 +511,7 @@ des fichiers JSON, en plus de leur mémorisation automatique (`QSettings`) :
   `Ctrl+L` rechercher un article ou un livre · `Ctrl+M` ajouter une molécule ·
   `Ctrl+W` fermer l'onglet · `Ctrl+1` page Recherche ·
   `Ctrl+2` page Comparaison · `Ctrl+3` page Interactions ·
+  `Ctrl+4` page Calendrier ·
   `Ctrl+Shift+S` enregistrer les tableaux · `Ctrl+Shift+O` charger les tableaux.
 * Le volet droit affiche `resume.html` **déjà généré** : instantané, sans
   accès réseau. Le bouton *Régénérer le résumé* relance le parser sur le
