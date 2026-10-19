@@ -84,6 +84,7 @@ from PySide6.QtGui import (
     QPolygonF,
     QStandardItem,
     QStandardItemModel,
+    QShortcut,
     QTextCursor,
     QTextDocument,
 )
@@ -3783,13 +3784,30 @@ def _fmt_valeur(value: float) -> str:
     return f"{value:.3g}".replace(".", ",")
 
 
+def _segment_distance(point: QPointF, start: QPointF, end: QPointF) -> float:
+    """Distance d'un point au segment [start, end] (pour cliquer une courbe)."""
+    dx = end.x() - start.x()
+    dy = end.y() - start.y()
+    length2 = dx * dx + dy * dy
+    if length2 <= 1e-12:
+        return math.hypot(point.x() - start.x(), point.y() - start.y())
+    t = ((point.x() - start.x()) * dx + (point.y() - start.y()) * dy) / length2
+    t = max(0.0, min(1.0, t))
+    return math.hypot(point.x() - (start.x() + t * dx),
+                      point.y() - (start.y() + t * dy))
+
+
 class PkChart(QWidget):
     """Graphique concentration relative / temps depuis la prise.
 
     Une courbe = {label, times (minutes), values, color, half_life_min,
-    tmax_min}. Le temps est en heures, la concentration en unites relatives ;
-    le point creux marque la demi-vie, la verticale pointillee le Tmax.
+    tmax_min, visible}. Le temps est en heures, la concentration en unites
+    relatives ; le point creux marque la demi-vie, la verticale pointillee le
+    Tmax. La courbe selectionnee est mise en evidence ; cliquer une courbe
+    emet `curveClicked`.
     """
+
+    curveClicked = Signal(int)
 
     MARGIN_LEFT = 66
     MARGIN_RIGHT = 18
@@ -3799,6 +3817,7 @@ class PkChart(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.series: list[dict] = []
+        self.selected = -1
         self.setMinimumSize(420, 280)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -3806,12 +3825,63 @@ class PkChart(QWidget):
         self.series = list(series or [])
         self.update()
 
+    def set_selected(self, index: int) -> None:
+        index = int(index)
+        if index != self.selected:
+            self.selected = index
+            self.update()
+
+    def _visible_series(self) -> list[tuple[int, dict]]:
+        """Indices et courbes affichables, dans l'ordre de `self.series`."""
+        return [(index, serie) for index, serie in enumerate(self.series)
+                if serie.get("times") and serie.get("values")
+                and serie.get("visible", True)]
+
+    def _bounds(self) -> Optional[tuple[float, float]]:
+        """(x_max en heures, y_max) des courbes visibles, ou None."""
+        visible = [serie for _, serie in self._visible_series()]
+        if not visible:
+            return None
+        x_max = max(serie["times"][-1] for serie in visible) / 60.0 or 1.0
+        y_max = max(max(serie["values"]) for serie in visible) or 1.0
+        return x_max, y_max * 1.06
+
     def _plot_rect(self) -> QRectF:
         return QRectF(
             float(self.MARGIN_LEFT), float(self.MARGIN_TOP),
             max(20.0, self.width() - self.MARGIN_LEFT - self.MARGIN_RIGHT),
             max(20.0, self.height() - self.MARGIN_TOP - self.MARGIN_BOTTOM),
         )
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - API Qt
+        """Clic pres d'une courbe -> selection (signal `curveClicked`)."""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        bounds = self._bounds()
+        if not bounds:
+            return
+        x_max, y_max = bounds
+        rect = self._plot_rect()
+        point = event.position()
+
+        def pixel(minutes: float, value: float) -> QPointF:
+            return QPointF(
+                rect.left() + rect.width() * (minutes / 60.0) / x_max,
+                rect.bottom() - rect.height() * value / y_max,
+            )
+
+        best, distance = -1, 10.0
+        for index, serie in self._visible_series():
+            previous = None
+            for minutes, value in zip(serie["times"], serie["values"]):
+                current = pixel(minutes, value)
+                if previous is not None:
+                    gap = _segment_distance(point, previous, current)
+                    if gap < distance:
+                        best, distance = index, gap
+                previous = current
+        if best >= 0:
+            self.curveClicked.emit(best)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
         painter = QPainter(self)
@@ -3827,16 +3897,18 @@ class PkChart(QWidget):
                          QPointF(rect.left(), rect.bottom()))
         painter.drawLine(QPointF(rect.left(), rect.bottom()),
                          QPointF(rect.right(), rect.bottom()))
-        series = [s for s in self.series
-                  if s.get("times") and s.get("values")]
-        if not series:
+        visible = self._visible_series()
+        if not visible:
             painter.setPen(QPen(QColor("#888888")))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
-                             "Entrez une molécule et sa dose, puis « Tracer ».")
+            message = ("Entrez une molécule et sa dose, puis « Tracer »."
+                       if not self.series else
+                       "Toutes les courbes sont masquées.")
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, message)
             return
-        x_max = max(s["times"][-1] for s in series) / 60.0 or 1.0
-        y_max = max(max(s["values"]) for s in series) or 1.0
-        y_max *= 1.06
+        bounds = self._bounds()
+        if not bounds:
+            return
+        x_max, y_max = bounds
 
         # au-dela de deux jours, l'axe des temps passe en jours : les
         # demi-vies longues (fluoxetine) restent lisibles
@@ -3886,14 +3958,25 @@ class PkChart(QWidget):
                          Qt.AlignmentFlag.AlignCenter,
                          "Concentration relative (u.a.)")
         painter.restore()
-        for serie in series:
+        # courbe selectionnee dessinee en dernier (au-dessus) et epaisse, les
+        # autres en trait fin et semi-transparent
+        ordonnees = sorted(visible, key=lambda paire: paire[0] == self.selected)
+        for index, serie in ordonnees:
+            choisi = index == self.selected
+            color = QColor(serie.get("color") or "#2e6db4")
+            if not choisi:
+                color.setAlpha(150)
             polygon = QPolygonF([
                 QPointF(xpix(t / 60.0), ypix(v))
                 for t, v in zip(serie["times"], serie["values"])
             ])
-            painter.setPen(QPen(QColor(serie.get("color") or "#2e6db4"), 2.0))
+            painter.setPen(QPen(color, 3.4 if choisi else 1.6))
             painter.drawPolyline(polygon)
-        for serie in series:
+        # reperes (Tmax, t½) de la seule courbe selectionnee : lisibles meme
+        # quand plusieurs courbes se superposent
+        for index, serie in visible:
+            if index != self.selected:
+                continue
             color = QColor(serie.get("color") or "#2e6db4")
             tmax = serie.get("tmax_min")
             if tmax and tmax / 60.0 <= x_max:
@@ -3907,19 +3990,22 @@ class PkChart(QWidget):
             times = serie["times"]
             if half and half / 60.0 <= x_max and len(times) > 1:
                 step = times[1] - times[0]
-                index = int(round(half / step)) if step else 0
-                index = max(0, min(index, len(serie["values"]) - 1))
-                point = QPointF(xpix(half / 60.0), ypix(serie["values"][index]))
+                point_index = int(round(half / step)) if step else 0
+                point_index = max(0, min(point_index,
+                                         len(serie["values"]) - 1))
+                point = QPointF(xpix(half / 60.0),
+                                ypix(serie["values"][point_index]))
                 painter.setPen(QPen(QColor("#333333"), 1.1))
                 painter.setBrush(QBrush(QColor("#ffffff")))
                 painter.drawEllipse(point, 4.0, 4.0)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawText(QRectF(point.x() - 30, point.y() - 20, 60, 14),
                                  Qt.AlignmentFlag.AlignCenter, "t½")
-        index = 0
-        for serie in series:
+        for index, serie in visible:
             y = rect.top() + 2 + index * 16
-            painter.setPen(QPen(QColor(serie.get("color") or "#2e6db4"), 2.0))
+            choisi = index == self.selected
+            painter.setPen(QPen(QColor(serie.get("color") or "#2e6db4"),
+                                3.0 if choisi else 1.8))
             painter.drawLine(QPointF(rect.right() - 140, y + 7),
                              QPointF(rect.right() - 118, y + 7))
             painter.setPen(QPen(QColor("#333333")))
@@ -3928,7 +4014,6 @@ class PkChart(QWidget):
             painter.drawText(QRectF(rect.right() - 114, y, 112, 16),
                              Qt.AlignmentFlag.AlignLeft
                              | Qt.AlignmentFlag.AlignVCenter, text)
-            index += 1
         painter.end()
 
 
@@ -3986,7 +4071,28 @@ class PharmacoPane(QWidget):
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._list_menu)
         self.list.itemSelectionChanged.connect(self._selection_changed)
+        self.list.itemChanged.connect(self._item_changed)
         column.addWidget(self.list, 1)
+
+        actions = QHBoxLayout()
+        self.toggle_button = QPushButton("Afficher / masquer", left)
+        self.toggle_button.setToolTip(
+            "Afficher ou masquer la courbe sélectionnée (case de la liste)")
+        self.toggle_button.clicked.connect(self.toggle_selected)
+        actions.addWidget(self.toggle_button)
+        self.remove_button = QPushButton("Retirer", left)
+        self.remove_button.setToolTip(
+            "Supprimer la courbe sélectionnée (touche Suppr)")
+        self.remove_button.clicked.connect(self.remove_selected)
+        actions.addWidget(self.remove_button)
+        column.addLayout(actions)
+
+        # touche Suppr / Retour arriere : supprime la courbe selectionnee
+        for sequence in (QKeySequence.StandardKey.Delete,
+                         QKeySequence(Qt.Key.Key_Backspace)):
+            shortcut = QShortcut(QKeySequence(sequence), self.list)
+            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+            shortcut.activated.connect(self.remove_selected)
 
         self.details = QTextBrowser(left)
         self.details.setMinimumHeight(190)
@@ -3994,6 +4100,7 @@ class PharmacoPane(QWidget):
         column.addWidget(self.details)
 
         self.chart = PkChart(self)
+        self.chart.curveClicked.connect(self._curve_clicked)
         split = QSplitter(Qt.Orientation.Horizontal, self)
         split.addWidget(left)
         split.addWidget(self.chart)
@@ -4023,19 +4130,37 @@ class PharmacoPane(QWidget):
 
     def clear(self) -> None:
         self.series = []
+        self.list.blockSignals(True)
         self.list.clear()
+        self.list.blockSignals(False)
         self.details.setHtml(self._help_html())
         self.message.setText("")
         self.chart.set_series([])
+        self.chart.set_selected(-1)
 
     def remove_selected(self) -> None:
+        """Supprime la courbe selectionnee (bouton Retirer, touche Suppr)."""
         row = self.list.currentRow()
         if not 0 <= row < len(self.series):
             return
         del self.series[row]
-        self._refresh()
-        if self.series:
-            self.list.setCurrentRow(min(row, len(self.series) - 1))
+        self._refresh(select=min(row, len(self.series) - 1) if self.series
+                      else None)
+
+    def toggle_selected(self) -> None:
+        """Affiche / masque la courbe selectionnee sur le graphique."""
+        row = self.list.currentRow()
+        if not 0 <= row < len(self.series):
+            return
+        serie = self.series[row]
+        serie["visible"] = not serie.get("visible", True)
+        item = self.list.item(row)
+        if item is not None:
+            self.list.blockSignals(True)
+            self._style_item(item, serie)
+            self.list.blockSignals(False)
+        self.chart.set_series(self.series)
+        self.chart.set_selected(self.list.currentRow())
 
     def add_report(self, molecule, dose, report, start=None) -> None:
         molecule = str(molecule or "").strip()
@@ -4050,6 +4175,7 @@ class PharmacoPane(QWidget):
             "molecule": molecule, "dose": dose, "label": label,
             "times": report["times"], "values": report["values"],
             "color": PK_COLORS[len(self.series) % len(PK_COLORS)],
+            "visible": True,
             "half_life_min": report["parameters"]["half_life_min"],
             "half_life_range": report["parameters"].get("half_life_range"),
             "half_life_text": report.get("half_life_text") or "",
@@ -4062,41 +4188,82 @@ class PharmacoPane(QWidget):
             if (existing["molecule"].casefold(), existing["dose"]) \
                     == (molecule.casefold(), dose):
                 serie["color"] = existing["color"]
+                serie["visible"] = existing.get("visible", True)
                 self.series[index] = serie
                 row = index
                 break
         else:
             self.series.append(serie)
-        self._refresh()
-        self.list.setCurrentRow(row)
+        self._refresh(select=row)
 
     # -- affichage --------------------------------------------------------
-    def _refresh(self) -> None:
+    @staticmethod
+    def _style_item(item, serie) -> None:
+        """Case a cocher = courbe visible ; libelle grise si masquee."""
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        visible = serie.get("visible", True)
+        item.setCheckState(Qt.CheckState.Checked if visible
+                           else Qt.CheckState.Unchecked)
+        item.setForeground(QBrush(QColor("#202020" if visible else "#9a9a9a")))
+
+    def _refresh(self, select=None) -> None:
+        current = self.list.currentRow() if select is None else select
         self.list.blockSignals(True)
         self.list.clear()
         for serie in self.series:
-            self.list.addItem(QListWidgetItem(serie["label"]))
+            item = QListWidgetItem(serie["label"])
+            self._style_item(item, serie)
+            self.list.addItem(item)
+        if self.series:
+            if current is None or not 0 <= current < len(self.series):
+                current = 0
+            self.list.setCurrentRow(current)
+        else:
+            self.list.setCurrentRow(-1)
         self.list.blockSignals(False)
         self.chart.set_series(self.series)
-        if self.series and self.list.currentRow() < 0:
-            self.list.setCurrentRow(0)
+        self.chart.set_selected(self.list.currentRow())
         self._selection_changed()
 
     def _selection_changed(self) -> None:
         row = self.list.currentRow()
+        self.chart.set_selected(row)
         if 0 <= row < len(self.series):
             self.details.setHtml(self._details_html(self.series[row]))
         else:
             self.details.setHtml(self._help_html())
+
+    def _item_changed(self, item) -> None:
+        """Case a cocher cochee/decochee : affiche ou masque la courbe."""
+        row = self.list.row(item)
+        if not 0 <= row < len(self.series):
+            return
+        serie = self.series[row]
+        serie["visible"] = item.checkState() == Qt.CheckState.Checked
+        self.list.blockSignals(True)
+        self._style_item(item, serie)
+        self.list.blockSignals(False)
+        self.chart.set_series(self.series)
+
+    def _curve_clicked(self, index: int) -> None:
+        """Clic pres d'une courbe du graphique : selectionne sa ligne."""
+        if 0 <= index < len(self.series):
+            self.list.setCurrentRow(index)
 
     def _list_menu(self, position) -> None:
         item = self.list.itemAt(position)
         if item is None:
             return
         self.list.setCurrentRow(self.list.row(item))
+        row = self.list.currentRow()
+        masquee = (0 <= row < len(self.series)
+                   and not self.series[row].get("visible", True))
         menu = QMenu(self)
+        menu.addAction("Afficher la courbe" if masquee else "Masquer la courbe"
+                       ).triggered.connect(self.toggle_selected)
         menu.addAction("Retirer la courbe").triggered.connect(
             self.remove_selected)
+        menu.addSeparator()
         menu.addAction("Vider le graphique").triggered.connect(self.clear)
         menu.exec(self.list.viewport().mapToGlobal(position))
 
@@ -4131,6 +4298,11 @@ class PharmacoPane(QWidget):
             "des durées du résumé.<br><br>"
             "Volume de distribution non documenté : l'axe vertical est en "
             "unités arbitraires et n'est pas comparable entre molécules.<br>"
+            "La <b>liste des courbes</b> les sélectionne (la courbe "
+            "sélectionnée est mise en évidence ; cliquer une courbe la "
+            "sélectionne aussi) ; sa <b>case</b> ou le bouton "
+            "<b>Afficher / masquer</b> l'affiche ou la masque ; le bouton "
+            "<b>Retirer</b> ou la touche <b>Suppr</b> la supprime.<br>"
             "Double-cliquer une prise du calendrier ouvre sa courbe."
         )
 
@@ -4138,6 +4310,8 @@ class PharmacoPane(QWidget):
     def _details_html(serie: dict) -> str:
         params = serie.get("parameters") or {}
         lines = [f"<b>{esc(str(serie.get('molecule') or ''))}</b>"]
+        if not serie.get("visible", True):
+            lines.append("<i>Courbe masquée sur le graphique.</i>")
         dose = serie.get("dose")
         if serie.get("dose_mg"):
             lines.append(f"Dose notée : {esc(dose)} "

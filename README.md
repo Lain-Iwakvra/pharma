@@ -563,8 +563,17 @@ relative** d'une molécule après une prise, à partir de sa dose et de son
   molécule, mais **n'est pas comparable entre molécules**.
 * **Superposition** : tracer une dose différente ou une autre molécule ajoute
   une courbe (une couleur par courbe, légende en haut à droite) ; retracer la
-  même molécule à la même dose la remplace. *Retirer* (menu contextuel) enlève
-  la courbe sélectionnée, *Vider* efface le graphique.
+  même molécule à la même dose la remplace. *Vider* efface le graphique.
+* **Sélection et mise en évidence** : choisir une ligne de la liste
+  **met en évidence** sa courbe (trait épais, tracés des autres atténués, ses
+  repères Tmax et `t½` affichés) ; **cliquer une courbe** du graphique
+  sélectionne à son tour sa ligne dans la liste.
+* **Afficher / masquer** : la **case à cocher** de chaque ligne (ou le bouton
+  *Afficher / masquer*, ou le menu contextuel) affiche ou masque une courbe
+  sans la retirer ; son libellé est grisé quand elle est masquée, et les
+  échelles du graphique se recalculent sur les courbes visibles.
+* **Supprimer une courbe** : le bouton ***Retirer***, la touche **Suppr**
+  (ou Retour arrière) ou le menu contextuel enlèvent la courbe sélectionnée.
 * Le panneau de gauche rappelle les **paramètres utilisés** (demi-vie, Tmax
   et sa source, constantes, biodisponibilité, durée) ; une molécule sans
   demi-vie documentée donne un message clair au lieu d'une courbe.
