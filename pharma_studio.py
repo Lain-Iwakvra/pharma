@@ -1874,6 +1874,7 @@ class ComparePane(QWidget):
         super().__init__(parent)
         self.settings = QSettings(ORG_NAME, APP_NAME)
         self.rows: list[dict] = []
+        self._filter = ""
         # colonnes : (libelle, cle) — « Molécule » et « État » jamais masquees
         self.columns: list[tuple[str, str]] = [
             ("Molécule", "__name"),
@@ -1943,6 +1944,17 @@ class ComparePane(QWidget):
         )
         refresh.triggered.connect(self.refreshRequested)
         bar.addAction(refresh)
+        bar.addSeparator()
+        bar.addWidget(QLabel("Filtre :", self))
+        self.filter_field = QLineEdit(self)
+        self.filter_field.setPlaceholderText("texte…")
+        self.filter_field.setClearButtonEnabled(True)
+        self.filter_field.setMaximumWidth(190)
+        self.filter_field.setToolTip(
+            "N'afficher que les lignes contenant ce texte, dans toutes les "
+            "colonnes (accents et casse ignorés).")
+        self.filter_field.textChanged.connect(self._filter_changed)
+        bar.addWidget(self.filter_field)
         self.count_label = QLabel(self)
         self.count_label.setMinimumWidth(160)
         self.count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -2006,6 +2018,23 @@ class ComparePane(QWidget):
         self.show_rows(self.rows)
 
     # -- tableau ----------------------------------------------------------
+    def _filter_changed(self, text: str) -> None:
+        self._filter = rm.fold_accents(str(text or "")).casefold().strip()
+        self.show_rows(self.rows)
+
+    def _row_matches(self, row: dict) -> bool:
+        """La ligne contient-elle le filtre (nom, état ou valeurs) ?"""
+        if not self._filter:
+            return True
+        parts = [str(row.get("name", "")), str(row.get("state", ""))]
+        for value in (row.get("fields") or {}).values():
+            if isinstance(value, (list, tuple)):
+                parts.extend(str(v) for v in value)
+            else:
+                parts.append(str(value))
+        blob = rm.fold_accents(" \u2022 ".join(parts)).casefold()
+        return self._filter in blob
+
     def show_rows(self, rows: list[dict]) -> None:
         """(Re)construit le tableau. Ligne = name, dir, state, fields."""
         self.rows = [dict(row) for row in rows]
@@ -2013,13 +2042,17 @@ class ComparePane(QWidget):
             (label, key) for label, key in self.columns
             if key not in self._hidden
         ]
+        shown = [
+            (r, row) for r, row in enumerate(self.rows)
+            if self._row_matches(row)
+        ]
         self.table.setSortingEnabled(False)
         self.table.setColumnCount(len(visible))
         self.table.setHorizontalHeaderLabels(
             [label for label, _ in visible]
         )
-        self.table.setRowCount(len(self.rows))
-        for r, row in enumerate(self.rows):
+        self.table.setRowCount(len(shown))
+        for display_row, (r, row) in enumerate(shown):
             fields = row.get("fields") or {}
             for c, (_, key) in enumerate(visible):
                 if key == "__name":
@@ -2043,7 +2076,7 @@ class ComparePane(QWidget):
                     if color:
                         item.setBackground(
                             QBrush(QColor(_state_background(color))))
-                self.table.setItem(r, c, item)
+                self.table.setItem(display_row, c, item)
         for c, (_, key) in enumerate(visible):
             if key == "__name":
                 self.table.setColumnWidth(c, 160)
@@ -2066,6 +2099,12 @@ class ComparePane(QWidget):
         available = sum(
             1 for row in self.rows if row.get("state") == "disponible"
         )
+        if self._filter:
+            shown = sum(1 for row in self.rows if self._row_matches(row))
+            self.count_label.setText(
+                f"{shown}/{total} molécule(s) — filtre actif")
+            self.count_label.setToolTip("Effacez le filtre pour tout voir.")
+            return
         self.count_label.setText(f"{total} molécule(s), {available} dispo.")
         self.count_label.setToolTip("")
 
@@ -2455,6 +2494,17 @@ class InteractionsPane(QWidget):
         self.hide_none = QCheckBox("Masquer les paires sans interaction", right)
         self.hide_none.toggled.connect(lambda _checked: self._apply_filter())
         filters.addWidget(self.hide_none)
+        filters.addWidget(QLabel("Recherche :", right))
+        self.text_filter = QLineEdit(right)
+        self.text_filter.setPlaceholderText("molécule, mécanisme, source…")
+        self.text_filter.setClearButtonEnabled(True)
+        self.text_filter.setMinimumWidth(200)
+        self.text_filter.setToolTip(
+            "N'afficher que les paires contenant ce texte (toutes colonnes, "
+            "accents et casse ignorés).")
+        self.text_filter.textChanged.connect(
+            lambda _text: self._apply_filter())
+        filters.addWidget(self.text_filter, 1)
         filters.addStretch(1)
         right_layout.addLayout(filters)
 
@@ -2567,6 +2617,16 @@ class InteractionsPane(QWidget):
             rows = [r for r in rows if int(r.get("rank", 0)) >= minimum]
         if self.hide_none.isChecked():
             rows = [r for r in rows if int(r.get("rank", 0)) > 0]
+        query = rm.fold_accents(self.text_filter.text() or "").casefold().strip()
+        if query:
+            keys = ("a", "b", "level_label", "mechanism", "mechanism_note",
+                    "sources", "detail")
+            rows = [
+                r for r in rows
+                if query in rm.fold_accents(
+                    " ".join(str(r.get(key, "")) for key in keys)
+                ).casefold()
+            ]
         self._visible = rows
         self._fill(rows)
 
@@ -3208,6 +3268,7 @@ class CalendarPane(QWidget):
         self._day_colors: dict = {}
         self._day_ranks: dict = {}
         self._day_counts: dict = {}
+        self.filter_text = ""
 
         bar = QToolBar(self)
         bar.setIconSize(QSize(16, 16))
@@ -3259,6 +3320,17 @@ class CalendarPane(QWidget):
         self.zoom.setCurrentText(self.mode)
         self.zoom.currentTextChanged.connect(self._set_mode)
         bar.addWidget(self.zoom)
+        bar.addSeparator()
+        bar.addWidget(QLabel("Filtre :", self))
+        self.filter_field = QLineEdit(self)
+        self.filter_field.setPlaceholderText("molécule…")
+        self.filter_field.setClearButtonEnabled(True)
+        self.filter_field.setMaximumWidth(170)
+        self.filter_field.setToolTip(
+            "N'afficher que les prises dont le nom de molécule contient ce "
+            "texte (accents et casse ignorés).")
+        self.filter_field.textChanged.connect(self._filter_changed)
+        bar.addWidget(self.filter_field)
 
         self.scroll = QScrollArea(self)
         self.scroll.setWidgetResizable(True)
@@ -3293,6 +3365,16 @@ class CalendarPane(QWidget):
 
     def current_day(self) -> QDate:
         return QDate(self.day)
+
+    def _filter_changed(self, text: str) -> None:
+        self.filter_text = rm.fold_accents(str(text or "")).casefold().strip()
+        self._rebuild()
+
+    def _matches_filter(self, entry) -> bool:
+        """La prise passe-t-elle le filtre de molécule (vide = tout) ?"""
+        if not self.filter_text:
+            return True
+        return self.filter_text in self.molecule_key(entry.get("molecule"))
 
     def show_date(self, day: QDate) -> None:
         """Place la vue sur un jour (sans changer de niveau)."""
@@ -3357,6 +3439,8 @@ class CalendarPane(QWidget):
         end_day = begin_day + timedelta(days=1)
         lanes = []
         for entry, start, segments, timeline in self._computed:
+            if not self._matches_filter(entry):
+                continue
             overlaps = any(begin < end_day and finish > begin_day
                            for _, begin, finish in segments)
             starts_today = begin_day <= start < end_day
@@ -3381,7 +3465,7 @@ class CalendarPane(QWidget):
     def _entries_of_day(self, day: QDate) -> list[dict]:
         key = day.toPython()
         return [entry for entry, start, _segments, _timeline in self._computed
-                if start.date() == key]
+                if start.date() == key and self._matches_filter(entry)]
 
     def _lane_map(self, begin: datetime, end: datetime) -> dict[str, int]:
         """Index de ligne de chaque molecule sur une periode (mois ou annee).
@@ -4323,6 +4407,7 @@ class PharmacoPane(QWidget):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.series: list[dict] = []
+        self._list_filter = ""
 
         left = QWidget(self)
         left.setFixedWidth(350)
@@ -4355,6 +4440,14 @@ class PharmacoPane(QWidget):
         column.addWidget(self.message)
 
         column.addWidget(QLabel("Courbes tracées", left))
+        self.filter_field = QLineEdit(left)
+        self.filter_field.setPlaceholderText("Filtrer les courbes…")
+        self.filter_field.setClearButtonEnabled(True)
+        self.filter_field.setToolTip(
+            "N'afficher que les courbes dont l'étiquette (molécule, dose) "
+            "contient ce texte.")
+        self.filter_field.textChanged.connect(self._list_filter_changed)
+        column.addWidget(self.filter_field)
         self.list = QListWidget(left)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._list_menu)
@@ -4439,27 +4532,27 @@ class PharmacoPane(QWidget):
 
     def remove_selected(self) -> None:
         """Supprime la courbe selectionnee (bouton Retirer, touche Suppr)."""
-        row = self.list.currentRow()
-        if not 0 <= row < len(self.series):
+        index = self._current_index()
+        if not 0 <= index < len(self.series):
             return
-        del self.series[row]
-        self._refresh(select=min(row, len(self.series) - 1) if self.series
+        del self.series[index]
+        self._refresh(select=min(index, len(self.series) - 1) if self.series
                       else None)
 
     def toggle_selected(self) -> None:
         """Affiche / masque la courbe selectionnee sur le graphique."""
-        row = self.list.currentRow()
-        if not 0 <= row < len(self.series):
+        index = self._current_index()
+        if not 0 <= index < len(self.series):
             return
-        serie = self.series[row]
+        serie = self.series[index]
         serie["visible"] = not serie.get("visible", True)
-        item = self.list.item(row)
+        item = self.list.currentItem()
         if item is not None:
             self.list.blockSignals(True)
             self._style_item(item, serie)
             self.list.blockSignals(False)
         self.chart.set_series(self.series)
-        self.chart.set_selected(self.list.currentRow())
+        self.chart.set_selected(self._current_index())
 
     def add_report(self, molecule, dose, report, start=None) -> None:
         molecule = str(molecule or "").strip()
@@ -4507,38 +4600,79 @@ class PharmacoPane(QWidget):
                                              "#e6e6e6" if visible else "#7a7a7a")))
 
     def _refresh(self, select=None) -> None:
-        current = self.list.currentRow() if select is None else select
+        if select is None:
+            select = self._current_index()
         self.list.blockSignals(True)
         self.list.clear()
-        for serie in self.series:
+        position = -1
+        for index, serie in enumerate(self.series):
+            if not self._series_matches(serie):
+                continue
             item = QListWidgetItem(serie["label"])
+            item.setData(Qt.ItemDataRole.UserRole, index)
             self._style_item(item, serie)
             self.list.addItem(item)
-        if self.series:
-            if current is None or not 0 <= current < len(self.series):
-                current = 0
-            self.list.setCurrentRow(current)
+            if index == select:
+                position = self.list.count() - 1
+        if self.list.count():
+            self.list.setCurrentRow(position if position >= 0 else 0)
         else:
             self.list.setCurrentRow(-1)
         self.list.blockSignals(False)
         self.chart.set_series(self.series)
-        self.chart.set_selected(self.list.currentRow())
+        self.chart.set_selected(self._current_index())
         self._selection_changed()
 
+    def _series_matches(self, serie) -> bool:
+        """La courbe passe-t-elle le filtre de la liste (vide = tout) ?"""
+        if not self._list_filter:
+            return True
+        if self._list_filter in rm.fold_accents(
+                str(serie.get("label") or "")).casefold():
+            return True
+        return self._list_filter in rm.fold_accents(
+            str(serie.get("molecule") or "")).casefold()
+
+    def _list_filter_changed(self, text: str) -> None:
+        self._list_filter = rm.fold_accents(str(text or "")).casefold().strip()
+        self._refresh(select=self._current_index())
+
+    def _current_index(self) -> int:
+        """Indice dans `self.series` de la courbe selectionnee, ou -1."""
+        item = self.list.currentItem()
+        data = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if data is None:
+            return -1
+        try:
+            return int(data)
+        except (TypeError, ValueError):
+            return -1
+
+    def _select_index(self, index: int) -> None:
+        """Selectionne dans la liste la courbe d'indice `index` (si visible)."""
+        if not 0 <= index < len(self.series):
+            return
+        for row in range(self.list.count()):
+            item = self.list.item(row)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == index:
+                self.list.setCurrentRow(row)
+                return
+
     def _selection_changed(self) -> None:
-        row = self.list.currentRow()
-        self.chart.set_selected(row)
-        if 0 <= row < len(self.series):
-            self.details.setHtml(self._details_html(self.series[row]))
+        index = self._current_index()
+        self.chart.set_selected(index)
+        if 0 <= index < len(self.series):
+            self.details.setHtml(self._details_html(self.series[index]))
         else:
             self.details.setHtml(self._help_html())
 
     def _item_changed(self, item) -> None:
         """Case a cocher cochee/decochee : affiche ou masque la courbe."""
-        row = self.list.row(item)
-        if not 0 <= row < len(self.series):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        index = int(data) if data is not None else self.list.row(item)
+        if not 0 <= index < len(self.series):
             return
-        serie = self.series[row]
+        serie = self.series[index]
         serie["visible"] = item.checkState() == Qt.CheckState.Checked
         self.list.blockSignals(True)
         self._style_item(item, serie)
@@ -4547,17 +4681,16 @@ class PharmacoPane(QWidget):
 
     def _curve_clicked(self, index: int) -> None:
         """Clic pres d'une courbe du graphique : selectionne sa ligne."""
-        if 0 <= index < len(self.series):
-            self.list.setCurrentRow(index)
+        self._select_index(index)
 
     def _list_menu(self, position) -> None:
         item = self.list.itemAt(position)
         if item is None:
             return
         self.list.setCurrentRow(self.list.row(item))
-        row = self.list.currentRow()
-        masquee = (0 <= row < len(self.series)
-                   and not self.series[row].get("visible", True))
+        index = self._current_index()
+        masquee = (0 <= index < len(self.series)
+                   and not self.series[index].get("visible", True))
         menu = QMenu(self)
         menu.addAction("Afficher la courbe" if masquee else "Masquer la courbe"
                        ).triggered.connect(self.toggle_selected)
@@ -4644,8 +4777,9 @@ class PharmacoPane(QWidget):
                 lines.append(f"Valeur source (demi-vie) : {esc(source)}")
         tmax = serie.get("tmax_min")
         if tmax:
-            lines.append(f"Tmax retenu : {_fmt_duree(tmax)} "
-                         f"({esc(serie['parameters'].get('tmax_source'))})")
+            source = serie["parameters"].get("tmax_source")
+            suffix = f" ({esc(str(source))})" if source else ""
+            lines.append(f"Tmax retenu : {_fmt_duree(tmax)}{suffix}")
         ke = serie["parameters"].get("ke")
         ka = serie["parameters"].get("ka")
         if ke and ka:
