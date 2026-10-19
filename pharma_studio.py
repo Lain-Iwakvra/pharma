@@ -37,10 +37,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import sys
 from datetime import datetime, timedelta
+from html import escape as esc
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -79,6 +81,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPdfWriter,
+    QPolygonF,
     QStandardItem,
     QStandardItemModel,
     QTextCursor,
@@ -2653,6 +2656,7 @@ class DayTimeline(QWidget):
     HOUR_WIDTH = 28
 
     laneClicked = Signal(int)
+    laneDoubleClicked = Signal(int)
     removeRequested = Signal()
 
     def __init__(self, parent=None):
@@ -2689,6 +2693,16 @@ class DayTimeline(QWidget):
                 self.update()
                 self.laneClicked.emit(index)
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - API Qt
+        if event.button() == Qt.LeftButton:
+            index = self.lane_at(float(event.position().y()))
+            if index >= 0:
+                self.selected = index
+                self.update()
+                self.laneDoubleClicked.emit(index)
+                return
+        super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - API Qt
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) \
@@ -2936,7 +2950,9 @@ class CalendarPane(QWidget):
     `ELIM_HALF_LIVES` demi-vies quand la demi-vie est documentée ; cliquer
     une ligne sélectionne la prise correspondante. Le point creux de la
     demi-vie est tracé aux trois échelles (frise du jour ; case du jour
-    où tombe le t½ dans les vues Mois et Année). Le journal peut être
+    où tombe le t½ dans les vues Mois et Année). **Double-cliquer une prise**
+    (liste du jour ou ligne de la frise) ouvre sa courbe pharmacocinétique
+    estimée (`curveRequested`). Le journal peut être
     enregistré dans un fichier, rechargé ou effacé (JSON versionné).
     Aucune posologie n'est proposée.
     """
@@ -2944,6 +2960,7 @@ class CalendarPane(QWidget):
     addRequested = Signal()
     editRequested = Signal(object)
     removeRequested = Signal(object)
+    curveRequested = Signal(object)
     refreshRequested = Signal()
     pathDropped = Signal(object)
     saveRequested = Signal()
@@ -3508,7 +3525,7 @@ class CalendarPane(QWidget):
         side = QVBoxLayout()
         side.addWidget(QLabel("Prises du jour", box))
         self.day_list = DayList(box)
-        self.day_list.itemDoubleClicked.connect(self._edit_item)
+        self.day_list.itemDoubleClicked.connect(self._curve_item)
         self.day_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.day_list.customContextMenuRequested.connect(self._day_menu)
         for entry in self._entries_of_day(day):
@@ -3536,6 +3553,7 @@ class CalendarPane(QWidget):
         self._day_timeline = timeline
         self._day_lanes = lanes
         timeline.laneClicked.connect(self._select_lane)
+        timeline.laneDoubleClicked.connect(self._curve_lane)
         timeline.removeRequested.connect(self._remove_selected)
         self.day_list.currentItemChanged.connect(self._selection_changed)
         self._selection_changed(self.day_list.currentItem(), None)
@@ -3640,6 +3658,10 @@ class CalendarPane(QWidget):
         if item is None:
             return
         menu = QMenu(self)
+        menu.addAction("Courbe pharmacocinétique…").triggered.connect(
+            lambda: self._curve_item(item)
+        )
+        menu.addSeparator()
         menu.addAction("Modifier…").triggered.connect(
             lambda: self._edit_item(item)
         )
@@ -3647,6 +3669,18 @@ class CalendarPane(QWidget):
             lambda: self._remove_item(item)
         )
         menu.exec(self.day_list.viewport().mapToGlobal(position))
+
+    def _curve_item(self, item) -> None:
+        entry = item.data(Qt.UserRole) if item is not None else None
+        if entry:
+            self.curveRequested.emit(entry)
+
+    def _curve_lane(self, index: int) -> None:
+        lanes = self._day_lanes or []
+        if 0 <= index < len(lanes):
+            entry = lanes[index].get("entry")
+            if entry:
+                self.curveRequested.emit(entry)
 
     def _edit_item(self, item) -> None:
         entry = item.data(Qt.UserRole) if item is not None else None
@@ -3689,6 +3723,428 @@ class CalendarPane(QWidget):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+
+# --- page pharmacocinetique : courbe concentration / temps -------------------
+PK_COLORS = ("#2e6db4", "#c0392b", "#27865a", "#8e44ad", "#d68910",
+             "#17a2b8", "#7f8c8d")
+
+
+def _nice_step(value: float) -> float:
+    """Pas « rond » en heures, au moins egal a `value`."""
+    for step in (0.5, 1, 2, 3, 6, 12, 24, 48, 72, 168):
+        if value <= step:
+            return float(step)
+    return 168.0
+
+
+def _nice_number(value: float) -> float:
+    """Nombre « rond » (1, 2, 2.5, 5 x 10^n) au moins egal a `value`."""
+    if value <= 0:
+        return 1.0
+    base = 10.0 ** math.floor(math.log10(value))
+    for multiple in (1.0, 2.0, 2.5, 5.0, 10.0):
+        if value <= multiple * base:
+            return multiple * base
+    return 10.0 * base
+
+
+def _fmt_heures(hours: float) -> str:
+    text = f"{hours:g}"
+    return text.replace(".", ",") + " h"
+
+
+def _fmt_valeur(value: float) -> str:
+    if abs(value) < 1e-12:
+        return "0"
+    return f"{value:.3g}".replace(".", ",")
+
+
+class PkChart(QWidget):
+    """Graphique concentration relative / temps depuis la prise.
+
+    Une courbe = {label, times (minutes), values, color, half_life_min,
+    tmax_min}. Le temps est en heures, la concentration en unites relatives ;
+    le point creux marque la demi-vie, la verticale pointillee le Tmax.
+    """
+
+    MARGIN_LEFT = 66
+    MARGIN_RIGHT = 18
+    MARGIN_TOP = 34
+    MARGIN_BOTTOM = 46
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.series: list[dict] = []
+        self.setMinimumSize(420, 280)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_series(self, series) -> None:
+        self.series = list(series or [])
+        self.update()
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(
+            float(self.MARGIN_LEFT), float(self.MARGIN_TOP),
+            max(20.0, self.width() - self.MARGIN_LEFT - self.MARGIN_RIGHT),
+            max(20.0, self.height() - self.MARGIN_TOP - self.MARGIN_BOTTOM),
+        )
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+        rect = self._plot_rect()
+        font = QFont(painter.font())
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        painter.setPen(QPen(QColor("#333333")))
+        painter.drawLine(QPointF(rect.left(), rect.top()),
+                         QPointF(rect.left(), rect.bottom()))
+        painter.drawLine(QPointF(rect.left(), rect.bottom()),
+                         QPointF(rect.right(), rect.bottom()))
+        series = [s for s in self.series
+                  if s.get("times") and s.get("values")]
+        if not series:
+            painter.setPen(QPen(QColor("#888888")))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
+                             "Entrez une molécule et sa dose, puis « Tracer ».")
+            return
+        x_max = max(s["times"][-1] for s in series) / 60.0 or 1.0
+        y_max = max(max(s["values"]) for s in series) or 1.0
+        y_max *= 1.06
+
+        def xpix(hours: float) -> float:
+            return rect.left() + rect.width() * hours / x_max
+
+        def ypix(value: float) -> float:
+            return rect.bottom() - rect.height() * value / y_max
+
+        step_x = _nice_step(x_max / 8.0)
+        hour = 0.0
+        while hour <= x_max + 1e-9:
+            x = xpix(hour)
+            painter.setPen(QPen(QColor("#e4e4e4")))
+            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+            painter.setPen(QPen(QColor("#666666")))
+            painter.drawText(QRectF(x - 26, rect.bottom() + 2, 52, 18),
+                             Qt.AlignmentFlag.AlignCenter, _fmt_heures(hour))
+            hour += step_x
+        step_y = _nice_number(y_max / 4.0)
+        value = 0.0
+        while value <= y_max + 1e-9:
+            y = ypix(value)
+            painter.setPen(QPen(QColor("#e4e4e4")))
+            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+            painter.setPen(QPen(QColor("#666666")))
+            painter.drawText(QRectF(2, y - 9, self.MARGIN_LEFT - 8, 18),
+                             Qt.AlignmentFlag.AlignRight
+                             | Qt.AlignmentFlag.AlignVCenter,
+                             _fmt_valeur(value))
+            value += step_y
+        painter.setPen(QPen(QColor("#333333")))
+        painter.drawText(QRectF(rect.left(), rect.bottom() + 22,
+                                rect.width(), 18),
+                         Qt.AlignmentFlag.AlignHCenter,
+                         "Temps depuis la prise (heures)")
+        painter.save()
+        painter.translate(12, rect.center().y())
+        painter.rotate(-90)
+        painter.drawText(QRectF(-rect.height() / 2, -10, rect.height(), 20),
+                         Qt.AlignmentFlag.AlignCenter,
+                         "Concentration relative (u.a.)")
+        painter.restore()
+        for serie in series:
+            polygon = QPolygonF([
+                QPointF(xpix(t / 60.0), ypix(v))
+                for t, v in zip(serie["times"], serie["values"])
+            ])
+            painter.setPen(QPen(QColor(serie.get("color") or "#2e6db4"), 2.0))
+            painter.drawPolyline(polygon)
+        for serie in series:
+            color = QColor(serie.get("color") or "#2e6db4")
+            tmax = serie.get("tmax_min")
+            if tmax and tmax / 60.0 <= x_max:
+                x = xpix(tmax / 60.0)
+                painter.setPen(QPen(color, 1.0, Qt.PenStyle.DashLine))
+                painter.drawLine(QPointF(x, rect.top()),
+                                 QPointF(x, rect.bottom()))
+                painter.drawText(QRectF(x + 2, rect.top() - 4, 60, 14),
+                                 Qt.AlignmentFlag.AlignLeft, "Tmax")
+            half = serie.get("half_life_min")
+            times = serie["times"]
+            if half and half / 60.0 <= x_max and len(times) > 1:
+                step = times[1] - times[0]
+                index = int(round(half / step)) if step else 0
+                index = max(0, min(index, len(serie["values"]) - 1))
+                point = QPointF(xpix(half / 60.0), ypix(serie["values"][index]))
+                painter.setPen(QPen(QColor("#333333"), 1.1))
+                painter.setBrush(QBrush(QColor("#ffffff")))
+                painter.drawEllipse(point, 4.0, 4.0)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawText(QRectF(point.x() - 30, point.y() - 20, 60, 14),
+                                 Qt.AlignmentFlag.AlignCenter, "t½")
+        index = 0
+        for serie in series:
+            y = rect.top() + 2 + index * 16
+            painter.setPen(QPen(QColor(serie.get("color") or "#2e6db4"), 2.0))
+            painter.drawLine(QPointF(rect.right() - 140, y + 7),
+                             QPointF(rect.right() - 118, y + 7))
+            painter.setPen(QPen(QColor("#333333")))
+            text = metrics.elidedText(str(serie.get("label") or ""),
+                                      Qt.TextElideMode.ElideRight, 112)
+            painter.drawText(QRectF(rect.right() - 114, y, 112, 16),
+                             Qt.AlignmentFlag.AlignLeft
+                             | Qt.AlignmentFlag.AlignVCenter, text)
+            index += 1
+        painter.end()
+
+
+class PharmacoPane(QWidget):
+    """Page Pharmacocinétique : courbe concentration / temps d'une prise.
+
+    On saisit une molécule (autocomplétion sur le répertoire et le journal)
+    et sa dose (texte libre), puis « Tracer » estime la courbe à partir des
+    durées documentées du résumé (demi-vie, onset, come-up). Plusieurs
+    molécules peuvent être superposées ; l'échelle verticale reste relative
+    (volume de distribution non documenté). Double-cliquer une prise du
+    calendrier ouvre sa courbe. Aucune posologie n'est proposée.
+    """
+
+    traceRequested = Signal(str, str)
+    pathDropped = Signal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.series: list[dict] = []
+
+        left = QWidget(self)
+        left.setFixedWidth(350)
+        column = QVBoxLayout(left)
+        fields = QFormLayout()
+        self.molecule = QLineEdit(left)
+        self.molecule.setPlaceholderText("Ex. : LSD")
+        self.completer = QCompleter([], self.molecule)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.molecule.setCompleter(self.completer)
+        fields.addRow("Molécule :", self.molecule)
+        self.dose = QLineEdit(left)
+        self.dose.setPlaceholderText("Dose (texte libre, ex. : 150 µg)")
+        fields.addRow("Dose :", self.dose)
+        column.addLayout(fields)
+
+        buttons = QHBoxLayout()
+        trace = QPushButton("Tracer", left)
+        trace.clicked.connect(self._request)
+        buttons.addWidget(trace)
+        clear = QPushButton("Vider", left)
+        clear.clicked.connect(self.clear)
+        buttons.addWidget(clear)
+        column.addLayout(buttons)
+
+        self.message = QLabel("", left)
+        self.message.setWordWrap(True)
+        self.message.setStyleSheet("color: #a03030;")
+        column.addWidget(self.message)
+
+        column.addWidget(QLabel("Courbes tracées", left))
+        self.list = QListWidget(left)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._list_menu)
+        self.list.itemSelectionChanged.connect(self._selection_changed)
+        column.addWidget(self.list, 1)
+
+        self.details = QTextBrowser(left)
+        self.details.setMinimumHeight(190)
+        self.details.setHtml(self._help_html())
+        column.addWidget(self.details)
+
+        self.chart = PkChart(self)
+        split = QSplitter(Qt.Orientation.Horizontal, self)
+        split.addWidget(left)
+        split.addWidget(self.chart)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([350, 940])
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(split)
+
+    # -- interface --------------------------------------------------------
+    def set_suggestions(self, names) -> None:
+        known = sorted({str(n).strip() for n in (names or [])
+                        if str(n).strip()}, key=str.casefold)
+        self.completer = QCompleter(known, self.molecule)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.molecule.setCompleter(self.completer)
+
+    def set_inputs(self, molecule, dose) -> None:
+        self.molecule.setText(str(molecule or ""))
+        self.dose.setText(str(dose or ""))
+
+    def _request(self) -> None:
+        self.traceRequested.emit(self.molecule.text().strip(),
+                                 self.dose.text().strip())
+
+    def clear(self) -> None:
+        self.series = []
+        self.list.clear()
+        self.details.setHtml(self._help_html())
+        self.message.setText("")
+        self.chart.set_series([])
+
+    def remove_selected(self) -> None:
+        row = self.list.currentRow()
+        if not 0 <= row < len(self.series):
+            return
+        del self.series[row]
+        self._refresh()
+        if self.series:
+            self.list.setCurrentRow(min(row, len(self.series) - 1))
+
+    def add_report(self, molecule, dose, report, start=None) -> None:
+        molecule = str(molecule or "").strip()
+        if not report.get("ok"):
+            self.message.setText(report.get("message")
+                                 or "Courbe indisponible.")
+            return
+        self.message.setText("")
+        dose = str(dose or "").strip()
+        label = molecule + (f" — {dose}" if dose else "")
+        serie = {
+            "molecule": molecule, "dose": dose, "label": label,
+            "times": report["times"], "values": report["values"],
+            "color": PK_COLORS[len(self.series) % len(PK_COLORS)],
+            "half_life_min": report["parameters"]["half_life_min"],
+            "tmax_min": report["parameters"]["tmax_min"],
+            "parameters": report["parameters"],
+            "dose_mg": report.get("dose_mg"), "start": start,
+        }
+        row = len(self.series)
+        for index, existing in enumerate(self.series):
+            if (existing["molecule"].casefold(), existing["dose"]) \
+                    == (molecule.casefold(), dose):
+                serie["color"] = existing["color"]
+                self.series[index] = serie
+                row = index
+                break
+        else:
+            self.series.append(serie)
+        self._refresh()
+        self.list.setCurrentRow(row)
+
+    # -- affichage --------------------------------------------------------
+    def _refresh(self) -> None:
+        self.list.blockSignals(True)
+        self.list.clear()
+        for serie in self.series:
+            self.list.addItem(QListWidgetItem(serie["label"]))
+        self.list.blockSignals(False)
+        self.chart.set_series(self.series)
+        if self.series and self.list.currentRow() < 0:
+            self.list.setCurrentRow(0)
+        self._selection_changed()
+
+    def _selection_changed(self) -> None:
+        row = self.list.currentRow()
+        if 0 <= row < len(self.series):
+            self.details.setHtml(self._details_html(self.series[row]))
+        else:
+            self.details.setHtml(self._help_html())
+
+    def _list_menu(self, position) -> None:
+        item = self.list.itemAt(position)
+        if item is None:
+            return
+        self.list.setCurrentRow(self.list.row(item))
+        menu = QMenu(self)
+        menu.addAction("Retirer la courbe").triggered.connect(
+            self.remove_selected)
+        menu.addAction("Vider le graphique").triggered.connect(self.clear)
+        menu.exec(self.list.viewport().mapToGlobal(position))
+
+    # -- glisser-deposer depuis l'explorateur -----------------------------
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - API Qt
+        if event.mimeData().hasFormat(PATH_MIME):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - API Qt
+        mime = event.mimeData()
+        if not mime.hasFormat(PATH_MIME):
+            event.ignore()
+            return
+        try:
+            path = bytes(mime.data(PATH_MIME)).decode("utf-8").strip()
+        except UnicodeDecodeError:
+            event.ignore()
+            return
+        if path:
+            self.pathDropped.emit(Path(path))
+            event.acceptProposedAction()
+
+    # -- textes -----------------------------------------------------------
+    @staticmethod
+    def _help_html() -> str:
+        return (
+            "Saisissez une molécule (autocomplétion sur le répertoire de "
+            "travail et le journal) et sa dose, puis <b>Tracer</b>.<br><br>"
+            "La courbe est une <b>estimation documentaire</b> : modèle à un "
+            "compartiment (absorption puis élimination du premier ordre), "
+            "sommet calé sur le Tmax, calculée à partir de la demi-vie et "
+            "des durées du résumé.<br><br>"
+            "Volume de distribution non documenté : l'axe vertical est en "
+            "unités arbitraires et n'est pas comparable entre molécules.<br>"
+            "Double-cliquer une prise du calendrier ouvre sa courbe."
+        )
+
+    @staticmethod
+    def _details_html(serie: dict) -> str:
+        params = serie.get("parameters") or {}
+        lines = [f"<b>{esc(str(serie.get('molecule') or ''))}</b>"]
+        dose = serie.get("dose")
+        if serie.get("dose_mg"):
+            lines.append(f"Dose notée : {esc(dose)} "
+                         f"({serie['dose_mg']:.3g} mg)")
+        elif dose:
+            lines.append(f"Dose notée : {esc(dose)} — non chiffrée, "
+                         "courbe normalisée")
+        else:
+            lines.append("Dose non notée — courbe normalisée")
+        half = serie.get("half_life_min")
+        if half:
+            lines.append(f"Demi-vie documentée : {_fmt_duree(half)}")
+        tmax = serie.get("tmax_min")
+        if tmax:
+            lines.append(f"Tmax retenu : {_fmt_duree(tmax)} "
+                         f"({esc(serie['parameters'].get('tmax_source'))})")
+        ke = serie["parameters"].get("ke")
+        ka = serie["parameters"].get("ka")
+        if ke and ka:
+            lines.append(f"Constantes : ke = {ke * 60:.4g} /h ; "
+                         f"ka = {ka * 60:.4g} /h")
+        bio = serie["parameters"].get("bioavailability")
+        if bio:
+            lines.append(f"Biodisponibilité : {bio * 100:.0f} %")
+        times = serie.get("times") or []
+        if times:
+            lines.append(f"Durée tracée : {_fmt_duree(times[-1])} "
+                         f"({sb.PK_HALF_LIVES} demi-vies)")
+        start = serie.get("start")
+        if start:
+            lines.append(f"Prise : {_fmt_date_longue(start)}")
+        lines.append("<hr>")
+        lines.append(
+            "Modèle à un compartiment (absorption puis élimination du premier "
+            "ordre, fonction de Bateman), sommet calé sur le Tmax. Volume de "
+            "distribution non documenté : concentration relative en unités "
+            "arbitraires, non comparable entre molécules.<br>"
+            "<b>Estimation documentaire — pas une donnée médicale.</b>"
+        )
+        return "<br>".join(lines)
 
 
 class MainWindow(QMainWindow):
@@ -3806,6 +4262,7 @@ class MainWindow(QMainWindow):
         self.calendar.saveRequested.connect(self._calendar_save_file)
         self.calendar.loadRequested.connect(self._calendar_load_file)
         self.calendar.clearRequested.connect(self._calendar_clear)
+        self.calendar.curveRequested.connect(self._calendar_curve)
         self.calendar_splitter = QSplitter(Qt.Horizontal, self)
         self.calendar_splitter.addWidget(self.calendar)
         self.calendar_splitter.setStretchFactor(0, 1)
@@ -3813,7 +4270,15 @@ class MainWindow(QMainWindow):
         self.calendar_splitter.setSizes([340, 960])
         self.pages.addTab(self.calendar_splitter, "Calendrier")
 
-        # non fermables : quatre onglets permanents, comme des modes de la fenetre
+        # page « Pharmacocinétique » : evolution estimee de la concentration
+        # relative d'une molecule (modele a un compartiment). Aucun acces
+        # reseau, aucune posologie proposee.
+        self.pharmaco = PharmacoPane(self)
+        self.pharmaco.traceRequested.connect(self._pharmaco_trace_dialog)
+        self.pharmaco.pathDropped.connect(self._pharmaco_add_from_tree)
+        self.pages.addTab(self.pharmaco, "Pharmacocinétique")
+
+        # non fermables : cinq onglets permanents, comme des modes de la fenetre
         self.pages.currentChanged.connect(self._page_changed)
         self.setCentralWidget(self.pages)
 
@@ -3930,6 +4395,11 @@ class MainWindow(QMainWindow):
         page_cal = QAction("Page Calendrier", self)
         page_cal.setShortcut("Ctrl+4")
         page_cal.triggered.connect(lambda: self.show_page(3))
+        view_menu.addAction(page_cal)
+        page_pk = QAction("Page Pharmacocinétique", self)
+        page_pk.setShortcut("Ctrl+5")
+        page_pk.triggered.connect(lambda: self.show_page(4))
+        view_menu.addAction(page_pk)
         view_menu.addAction(page_cal)
 
         help_menu = self.menuBar().addMenu("&Aide")
@@ -4722,6 +5192,58 @@ class MainWindow(QMainWindow):
         self.show_page(3)
         self._calendar_add_dialog({"molecule": name})
 
+    # -- page Pharmacocinétique -------------------------------------------
+    def _pharmaco_suggestions(self) -> list[str]:
+        """Molécules proposées : répertoire de travail + journal des prises."""
+        names = {str(e.get("molecule") or "") for e in self._calendar_items()}
+        if self.root is not None:
+            for entry in sb.molecule_catalogue(self.root):
+                names.add(str(entry.get("name") or ""))
+        return sorted((n for n in names if n.strip()), key=str.casefold)
+
+    def _pharmaco_trace_dialog(self, molecule: str, dose: str) -> None:
+        """Trace demandé depuis la page elle-même (bouton « Tracer »)."""
+        self._pharmaco_trace(molecule, dose)
+
+    def _pharmaco_trace(self, molecule: str, dose: str,
+                        start: str | None = None) -> None:
+        """Estime et affiche la courbe d'une molécule à partir de son résumé."""
+        molecule = str(molecule or "").strip()
+        if not molecule:
+            self.pharmaco.message.setText("Entrez une molécule.")
+            return
+        directory = (sb.find_molecule_dir(self.root, molecule)
+                     if self.root is not None else None)
+        report = sb.pharmacokinetic_report(directory, dose)
+        self.pharmaco.add_report(molecule, dose, report, start=start)
+
+    def _calendar_curve(self, entry) -> None:
+        """Double-clic : passe en mode pharmacocinétique pour cette prise."""
+        entry = sb.normalise_entry(entry)
+        self.show_page(4)
+        self.pharmaco.set_inputs(entry["molecule"], entry.get("dose", ""))
+        self._pharmaco_trace(entry["molecule"], entry.get("dose", ""),
+                             start=entry.get("start"))
+
+    def _pharmaco_add_from_tree(self, path) -> None:
+        """Dépôt d'un dossier/fichier de molécule : trace sa courbe."""
+        path = Path(path)
+        name = ""
+        if path.is_dir():
+            if sb.is_workspace_root(path, self.root):
+                return
+            name = sb.read_molecule_meta(path)
+            if not name and sb.has_resume(path):
+                name = sb.resume_molecule_name(path)
+            name = name or path.name
+        elif path.is_file() and self.root is not None:
+            _directory, name = sb.locate_molecule(path, self.root)
+        if not name:
+            return
+        self.show_page(4)
+        self.pharmaco.set_inputs(name, "")
+        self._pharmaco_trace(name, "")
+
     def _calendar_save_file(self) -> None:
         """Enregistre une copie du journal des prises dans un fichier choisi."""
         path, _filter = QFileDialog.getSaveFileName(
@@ -4815,9 +5337,9 @@ class MainWindow(QMainWindow):
 
     # -- bascule entre pages ----------------------------------------------
     def show_page(self, index: int) -> None:
-        """Bascule entre Recherche (0), Comparaison (1), Interactions (2)
-        et Calendrier (3)."""
-        self.pages.setCurrentIndex(max(0, min(int(index), 3)))
+        """Bascule entre Recherche (0), Comparaison (1), Interactions (2),
+        Calendrier (3) et Pharmacocinétique (4)."""
+        self.pages.setCurrentIndex(max(0, min(int(index), 4)))
 
     def _page_changed(self, index: int) -> None:
         """Un seul explorateur : il est deplace dans la page active.
@@ -4842,6 +5364,14 @@ class MainWindow(QMainWindow):
                 self._interactions_activate()
             else:
                 self._calendar_activate()
+        elif index == 4:
+            # la page Pharmacocinétique n'utilise pas l'explorateur : il
+            # reste (cache) dans la page Recherche.
+            if self.workspace.parent() is not self.splitter:
+                self.splitter.insertWidget(0, self.workspace)
+                if len(self._research_sizes) == 3:
+                    self.splitter.setSizes(self._research_sizes)
+            self.pharmaco.set_suggestions(self._pharmaco_suggestions())
         else:
             if self.workspace.parent() is not self.splitter:
                 self.splitter.insertWidget(0, self.workspace)

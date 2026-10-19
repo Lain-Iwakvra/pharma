@@ -30,6 +30,7 @@ import base64
 import csv
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -827,6 +828,212 @@ def influence_end_minutes(timeline: Optional[dict] = None,
     """Fin de la periode d'effet, en minutes apres la prise (0 si inconnue)."""
     segments = influence_segments(timeline, override_min)
     return max((end for _, _, end in segments), default=0.0)
+
+
+# --- pharmacocinetique : courbe d'absorption / elimination -------------------
+#
+# Modele simple a un compartiment : absorption du premier ordre (constante
+# `ka`) puis elimination du premier ordre (constante `ke = ln 2 / demi-vie`).
+# La concentration relative suit la fonction de Bateman
+#
+#   c(t) = (exp(-ke t) - exp(-ka t)) / (exp(-ke Tmax) - exp(-ka Tmax))
+#
+# normalisee a 1 au sommet (Tmax), puis mise a l'echelle par la dose et la
+# biodisponibilite quand elles sont chiffrees. Le volume de distribution
+# n'etant pas documente, l'axe vertical reste relatif (unites arbitraires) :
+# c'est une estimation documentaire, jamais une posologie.
+
+# duree representee par defaut : 5 demi-vies (~97 % elimine)
+PK_HALF_LIVES = 5
+
+# unites de dose converties en milligrammes (texte libre de l'utilisateur)
+DOSE_UNITS = {
+    "µg": 0.001, "μg": 0.001, "ug": 0.001, "mcg": 0.001, "ng": 1e-06,
+    "mg": 1.0, "g": 1000.0,
+}
+
+
+def _midpoint(value) -> float:
+    """Milieu d'une plage (min, max) en minutes ; 0 si absente ou illisible."""
+    try:
+        return (float(value[0]) + float(value[1])) / 2.0
+    except (TypeError, ValueError, IndexError):
+        return 0.0
+
+
+def parse_dose_mg(text) -> Optional[float]:
+    """Dose texte (« 150 µg », « 1,5 g », « 100 mg ») convertie en mg.
+
+    Seul le premier nombre suivi d'une unite est lu ; sans unite, la valeur
+    est prise en milligrammes. Renvoie None si aucun nombre n'est lisible.
+    """
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return None
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(µg|μg|ug|mcg|mg|g|ng)?", raw)
+    if match is None:
+        return None
+    value = float(match.group(1).replace(",", "."))
+    unit = match.group(2) or "mg"
+    return value * DOSE_UNITS.get(unit, 1.0)
+
+
+def parse_fraction(text) -> Optional[float]:
+    """« 71 % » ou « 0,71 » -> 0.71 ; None si illisible ou hors de ]0, 1]."""
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return None
+    numbers = _NUMBER_RE.findall(raw.split(";")[0])
+    if not numbers:
+        return None
+    value = float(numbers[0].replace(",", "."))
+    if "%" in raw or value > 1.0:
+        value /= 100.0
+    return value if 0.0 < value <= 1.0 else None
+
+
+def _solve_ka(ke: float, tmax: float) -> float:
+    """Constante d'absorption telle que le sommet du modele tombe sur le Tmax.
+
+    Resout `Tmax = ln(ka/ke) / (ka - ke)` par dichotomie, avec `ka > ke`.
+    """
+    low = ke * (1.0 + 1e-9)
+    high = ke * 1e6
+    for _ in range(100):
+        middle = math.sqrt(low * high)
+        value = math.log(middle / ke) / (middle - ke)
+        if value > tmax:
+            low = middle
+        else:
+            high = middle
+    return math.sqrt(low * high)
+
+
+def pk_parameters(timeline: Optional[dict] = None, *,
+                  tmax_min: Optional[float] = None,
+                  bioavailability: Optional[float] = None) -> dict:
+    """Parametres du modele a un compartiment, d'apres les durees documentees.
+
+    `ke = ln 2 / demi-vie` ; `ka` est resolu pour que le sommet tombe sur le
+    Tmax (fourni, sinon fin de la montee `onset + come-up`, sinon estime a
+    demi-vie / 2). Renvoie un dictionnaire vide si la demi-vie manque.
+    """
+    timeline = timeline or {}
+    half = timeline.get("halflife")
+    if not half or float(half[0]) <= 0:
+        return {}
+    half_min = _midpoint(half)
+    ke = math.log(2) / half_min
+    if tmax_min and float(tmax_min) > 0:
+        tmax = float(tmax_min)
+        source = "Tmax fourni"
+    else:
+        onset = timeline.get("onset")
+        comeup = timeline.get("comeup")
+        if onset or comeup:
+            tmax = _midpoint(onset) + _midpoint(comeup)
+            source = "fin de la montee (onset + come-up)"
+        else:
+            tmax = half_min / 2.0
+            source = "estimation (demi-vie / 2)"
+    # au-dela de ~1/ke, l'absorption serait plus lente que l'elimination :
+    # hors du domaine du modele (flip-flop), on borne le Tmax.
+    limit = 0.98 / ke
+    if tmax >= limit:
+        tmax = limit
+        source += " — borne du modele"
+    total = timeline.get("total")
+    return {
+        "half_life_min": half_min,
+        "half_life_range": half,
+        "ke": ke,
+        "ka": _solve_ka(ke, tmax),
+        "tmax_min": tmax,
+        "tmax_source": source,
+        "total_high": float(total[1]) if total else 0.0,
+        "bioavailability": bioavailability,
+    }
+
+
+def pk_curve(parameters: Optional[dict], *, dose_mg: Optional[float] = None,
+             end_min: Optional[float] = None, points: int = 361
+             ) -> tuple[list[float], list[float]]:
+    """Courbe d'une prise : (temps en minutes, concentration relative).
+
+    L'echelle verticale est relative (u.a.) : proportionnelle a la dose
+    chiffree et a la biodisponibilite quand elles sont connues, sinon
+    normalisee a 1 au sommet. Duree par defaut : `PK_HALF_LIVES` demi-vies
+    (au moins la duree d'action documentee).
+    """
+    if not parameters:
+        return [], []
+    ke = parameters["ke"]
+    ka = parameters["ka"]
+    tmax = parameters["tmax_min"]
+    peak = math.exp(-ke * tmax) - math.exp(-ka * tmax)
+    if peak <= 0:
+        return [], []
+    if not end_min:
+        end_min = max(PK_HALF_LIVES * parameters["half_life_min"],
+                      4.0 * tmax, float(parameters.get("total_high") or 0.0))
+    scale = float(dose_mg) if dose_mg else 1.0
+    bio = parameters.get("bioavailability")
+    if bio:
+        scale *= float(bio)
+    points = max(2, int(points))
+    times = [end_min * index / (points - 1) for index in range(points)]
+    values = [scale * (math.exp(-ke * t) - math.exp(-ka * t)) / peak
+              for t in times]
+    return times, values
+
+
+def _read_bioavailability(molecule_dir: Optional[Path]) -> Optional[float]:
+    """Biodisponibilite chiffree du resume d'une molecule (fraction), si lue."""
+    if molecule_dir is None:
+        return None
+    try:
+        data = json.loads(
+            (Path(molecule_dir) / RESUME_JSON).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    pharm = data.get("pharmacology")
+    if not isinstance(pharm, dict):
+        return None
+    return parse_fraction(_pharmacology_text(pharm, "bioavailability"))
+
+
+def pharmacokinetic_report(molecule_dir: Optional[Path] = None, dose: str = "",
+                           *, timeline: Optional[dict] = None,
+                           tmax_min: Optional[float] = None) -> dict:
+    """Prepare la courbe PK d'une prise : parametres, points et messages.
+
+    `dose` est du texte libre (« 150 µg ») ; seule la valeur chiffree sert a
+    l'echelle verticale. Le dictionnaire renvoye est toujours exploitable :
+    `ok`, `message` si la courbe est impossible, sinon `times`, `values`,
+    `dose_mg`, `parameters`.
+    """
+    timeline = (timeline if timeline is not None
+                else molecule_timeline(molecule_dir))
+    params = pk_parameters(
+        timeline, tmax_min=tmax_min,
+        bioavailability=_read_bioavailability(molecule_dir),
+    )
+    dose_mg = parse_dose_mg(dose)
+    if not params:
+        return {
+            "ok": False,
+            "message": "Demi-vie non documentée : la courbe "
+                       "pharmacocinétique ne peut pas être estimée pour "
+                       "cette molécule (renseignez son résumé, ou vérifiez "
+                       "que le dossier est dans le répertoire de travail).",
+            "parameters": {}, "times": [], "values": [], "dose_mg": dose_mg,
+        }
+    times, values = pk_curve(params, dose_mg=dose_mg)
+    return {"ok": True, "message": "", "times": times, "values": values,
+            "dose_mg": dose_mg, "parameters": params}
 
 
 def normalise_entry(entry: dict) -> dict:

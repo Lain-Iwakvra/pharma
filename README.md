@@ -147,9 +147,10 @@ python3 pharma_studio.py --workspace ~/pharma
 Au premier lancement, une boîte de dialogue demande le **répertoire de
 travail** ; il est mémorisé pour les fois suivantes (`QSettings`).
 
-La fenêtre comporte quatre pages, conservées en haut (`Ctrl+1` à `Ctrl+4`) :
-**Recherche** (les trois volets ci-dessus), **Comparaison**, **Interactions**
-et **Calendrier** — voir les sections correspondantes plus bas.
+La fenêtre comporte cinq pages, conservées en haut (`Ctrl+1` à `Ctrl+5`) :
+**Recherche** (les trois volets ci-dessus), **Comparaison**, **Interactions**,
+**Calendrier** et **Pharmacocinétique** — voir les sections correspondantes
+plus bas.
 
 ### Organisation du répertoire de travail
 
@@ -464,8 +465,10 @@ après chaque prise.
   d'un jour selon le niveau, et *Aujourd'hui* revient à la date du jour.
 * **« Ajouter une prise… »** demande la molécule (autocomplétion sur les
   molécules du travail et les noms déjà saisis), la date, l'heure, la dose
-  (texte libre) et une note facultative. Dans la vue Jour, double-clic ou
-  menu contextuel pour **modifier** ou **supprimer** une prise.
+  (texte libre) et une note facultative. Dans la vue Jour, **double-cliquer
+  une prise** (liste ou ligne de la frise) ouvre sa **courbe
+  pharmacocinétique** (page suivante) ; le menu contextuel permet de la
+  **modifier** ou de la **supprimer**, comme le bouton *Modifier…*.
 * **Sélectionner une prise** : cliquer sur une **ligne** (vue Jour)
   sélectionne la prise correspondante dans la liste — et réciproquement,
   choisir une ligne de la liste surligne la ligne de la frise. Les boutons
@@ -526,6 +529,41 @@ après chaque prise.
 > PsychonautWiki / Wikipedia) : ce n'est ni une donnée médicale, ni une
 > indication de conduite à tenir.
 
+### Page « Pharmacocinétique »
+
+Cinquième page : elle trace la **courbe d'évolution de la concentration
+relative** d'une molécule après une prise, à partir de sa dose et de son
+`resume.json`. **Aucune posologie n'y est proposée** : c'est une
+**estimation documentaire**, jamais une donnée médicale.
+
+* On saisit une **molécule** (autocomplétion sur les molécules du travail et
+  le journal) et une **dose** (texte libre, par ex. `150 µg`, `1,5 g`,
+  `100 mg`), puis **Tracer**. Seul le premier nombre suivi de son unité sert
+  d'échelle ; une dose non chiffrée donne une courbe normalisée (sommet à 1).
+* **Modèle** : un compartiment, absorption puis élimination du premier ordre
+  (fonction de Bateman). La constante d'élimination est `ke = ln 2 / demi-vie`
+  et la constante d'absorption `ka` est résolue pour que le sommet tombe sur
+  le **Tmax**, pris comme la fin de la montée (`onset + come-up`) documentée.
+  La biodisponibilité chiffrée, quand elle existe, met la courbe à l'échelle.
+* **Repères** : la **verticale pointillée** marque le Tmax et l'unique
+  **point creux** la demi-vie (`t½`) ; l'axe horizontal est le temps depuis la
+  prise en heures, l'axe vertical une **concentration relative** en unités
+  arbitraires (`u.a.`). La durée tracée est de **5 demi-vies**.
+* Le volume de distribution n'étant pas documenté, l'échelle verticale reste
+  **relative** : elle est proportionnelle à la dose saisie pour une **même**
+  molécule, mais **n'est pas comparable entre molécules**.
+* **Superposition** : tracer une dose différente ou une autre molécule ajoute
+  une courbe (une couleur par courbe, légende en haut à droite) ; retracer la
+  même molécule à la même dose la remplace. *Retirer* (menu contextuel) enlève
+  la courbe sélectionnée, *Vider* efface le graphique.
+* Le panneau de gauche rappelle les **paramètres utilisés** (demi-vie, Tmax
+  et sa source, constantes, biodisponibilité, durée) ; une molécule sans
+  demi-vie documentée donne un message clair au lieu d'une courbe.
+* **Depuis le calendrier** : double-cliquer une prise (liste du jour ou ligne
+  de la frise) bascule sur cette page et affiche la courbe correspondant à la
+  molécule, la dose et la date de la prise. On peut aussi déposer un dossier
+  de molécule de l'explorateur sur la page.
+
 ### Enregistrer et charger les tableaux
 
 Les tableaux **Comparaison** et **Interactions** peuvent être conservés dans
@@ -557,7 +595,7 @@ des fichiers JSON, en plus de leur mémorisation automatique (`QSettings`) :
   `Ctrl+L` rechercher un article ou un livre · `Ctrl+M` ajouter une molécule ·
   `Ctrl+W` fermer l'onglet · `Ctrl+1` page Recherche ·
   `Ctrl+2` page Comparaison · `Ctrl+3` page Interactions ·
-  `Ctrl+4` page Calendrier ·
+  `Ctrl+4` page Calendrier · `Ctrl+5` page Pharmacocinétique ·
   `Ctrl+Shift+S` enregistrer les tableaux · `Ctrl+Shift+O` charger les tableaux ·
   `Ctrl+Alt+S` enregistrer le calendrier · `Ctrl+Alt+O` charger le calendrier.
 * Le volet droit affiche `resume.html` **déjà généré** : instantané, sans
