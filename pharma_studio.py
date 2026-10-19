@@ -4794,6 +4794,11 @@ class PharmacoPane(QWidget):
             item = self.list.item(row)
             if item is not None and item.data(Qt.ItemDataRole.UserRole) == index:
                 self.list.setCurrentRow(row)
+                self.list.scrollToItem(item)
+                # cliquer une courbe du graphique doit rendre le focus a la
+                # liste : le raccourci Suppr est un WidgetShortcut, il n'agit
+                # que si la liste a le focus.
+                self.list.setFocus(Qt.FocusReason.MouseFocusReason)
                 return
 
     def _selection_changed(self) -> None:
