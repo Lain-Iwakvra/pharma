@@ -78,6 +78,7 @@ from PySide6.QtGui import (
     QPageLayout,
     QPageSize,
     QPainter,
+    QPalette,
     QPen,
     QPixmap,
     QPdfWriter,
@@ -148,6 +149,83 @@ DISCLAIMER = (
 
 # type MIME des glisser-deposer internes : le chemin depose vers le tableau
 PATH_MIME = "application/x-pharma-path"
+
+
+# --- theme (clair / sombre) ---------------------------------------------------
+THEME_SETTING = "theme"
+THEMES = ("clair", "sombre")
+_ACTIVE_THEME = "clair"
+_ORIGINAL_STYLE: str | None = None
+_ORIGINAL_PALETTE = None
+
+
+def active_theme() -> str:
+    """Thème courant : « clair » ou « sombre »."""
+    return _ACTIVE_THEME
+
+
+def theme_color(light: str, dark: str) -> QColor:
+    """Couleur adaptée au thème (pour les widgets peints à la main)."""
+    return QColor(dark if _ACTIVE_THEME == "sombre" else light)
+
+
+def _dark_palette() -> QPalette:
+    """Palette sombre (style Fusion) : contraste doux, lisible."""
+    pal = QPalette()
+    window = QColor("#2b2b2b")
+    base = QColor("#232323")
+    text = QColor("#e6e6e6")
+    pal.setColor(QPalette.ColorRole.Window, window)
+    pal.setColor(QPalette.ColorRole.WindowText, text)
+    pal.setColor(QPalette.ColorRole.Base, base)
+    pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#2f2f2f"))
+    pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#3a3a3a"))
+    pal.setColor(QPalette.ColorRole.ToolTipText, text)
+    pal.setColor(QPalette.ColorRole.Text, text)
+    pal.setColor(QPalette.ColorRole.Button, QColor("#333333"))
+    pal.setColor(QPalette.ColorRole.ButtonText, text)
+    pal.setColor(QPalette.ColorRole.BrightText, QColor("#ff6b6b"))
+    pal.setColor(QPalette.ColorRole.Link, QColor("#6fa8dc"))
+    pal.setColor(QPalette.ColorRole.Highlight, QColor("#3d6ea5"))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    pal.setColor(QPalette.ColorRole.Light, QColor("#454545"))
+    pal.setColor(QPalette.ColorRole.Midlight, QColor("#3a3a3a"))
+    pal.setColor(QPalette.ColorRole.Mid, QColor("#8a8a8a"))
+    pal.setColor(QPalette.ColorRole.Dark, QColor("#101010"))
+    pal.setColor(QPalette.ColorRole.Shadow, QColor("#000000"))
+    pal.setColor(QPalette.ColorRole.PlaceholderText, QColor("#9a9a9a"))
+    for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text,
+                 QPalette.ColorRole.ButtonText):
+        pal.setColor(QPalette.ColorGroup.Disabled, role, QColor("#6a6a6a"))
+    return pal
+
+
+def ensure_default_style(app) -> None:
+    """Mémorise le style et la palette d'origine (pour revenir au thème clair)."""
+    global _ORIGINAL_STYLE, _ORIGINAL_PALETTE
+    if _ORIGINAL_STYLE is None:
+        _ORIGINAL_STYLE = app.style().objectName()
+        _ORIGINAL_PALETTE = QPalette(app.palette())
+
+
+def apply_theme(app, mode: str) -> str:
+    """Applique le thème clair ou sombre à toute l'application.
+
+    Renvoie le thème effectivement retenu. Le style « Fusion » est utilisé
+    pour que la palette sombre soit rendue de façon homogène.
+    """
+    global _ACTIVE_THEME
+    mode = mode if mode in THEMES else "clair"
+    if app is None:
+        _ACTIVE_THEME = mode
+        return mode
+    ensure_default_style(app)
+    _ACTIVE_THEME = mode
+    app.setStyle("Fusion")
+    app.setPalette(_dark_palette() if mode == "sombre"
+                   else QPalette(_ORIGINAL_PALETTE))
+    return mode
+
 
 
 # --- infrastructure de taches de fond ----------------------------------------
@@ -1648,7 +1726,7 @@ class WelcomePane(QWidget):
             self,
         )
         text.setAlignment(Qt.AlignCenter)
-        text.setStyleSheet("color: #555;")
+        text.setStyleSheet("color: palette(mid);")
         layout.addWidget(text)
         button = QPushButton("Choisir un répertoire de travail…", self)
         button.clicked.connect(self.chooseRequested.emit)
@@ -1963,7 +2041,8 @@ class ComparePane(QWidget):
                 elif key == "__state":
                     color = self.STATE_COLORS.get(value)
                     if color:
-                        item.setBackground(QBrush(QColor(color)))
+                        item.setBackground(
+                            QBrush(QColor(_state_background(color))))
                 self.table.setItem(r, c, item)
         for c, (_, key) in enumerate(visible):
             if key == "__name":
@@ -2326,7 +2405,7 @@ class InteractionsPane(QWidget):
         bar.addAction(export)
 
         self.base_label = QLabel(self)
-        self.base_label.setStyleSheet("color: #666; padding: 0 8px;")
+        self.base_label.setStyleSheet("color: palette(mid); padding: 0 8px;")
         bar.addSeparator()
         bar.addWidget(self.base_label)
 
@@ -2351,7 +2430,7 @@ class InteractionsPane(QWidget):
             left,
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #777;")
+        hint.setStyleSheet("color: palette(mid);")
         left_layout.addWidget(hint)
 
         # volet droit : paires d'interactions
@@ -2402,7 +2481,7 @@ class InteractionsPane(QWidget):
 
         self.status = QLabel(self)
         self.status.setWordWrap(True)
-        self.status.setStyleSheet("color: #555; padding: 2px 6px;")
+        self.status.setStyleSheet("color: palette(mid); padding: 2px 6px;")
         right_layout.addWidget(self.status)
 
         self.warning = QLabel(
@@ -2415,7 +2494,7 @@ class InteractionsPane(QWidget):
             self,
         )
         self.warning.setWordWrap(True)
-        self.warning.setStyleSheet("color: #8a5a00; padding: 2px 6px;")
+        self.warning.setStyleSheet("color: #c08000; padding: 2px 6px;")
         right_layout.addWidget(self.warning)
 
         splitter = QSplitter(Qt.Horizontal, self)
@@ -2522,7 +2601,8 @@ class InteractionsPane(QWidget):
                 for c in (0, 1, 2):
                     cell = self.table.item(r, c)
                     if cell is not None:
-                        cell.setBackground(QBrush(QColor(color)))
+                        cell.setBackground(
+                            QBrush(QColor(_state_background(color))))
         self.table.setSortingEnabled(True)
         if section >= 0:
             self.table.sortItems(section, order)
@@ -2583,19 +2663,41 @@ CELL_LANES_MONTH = 5
 CELL_LANES_YEAR = 3
 
 
-def _tint(color: str, ratio: float = 0.22) -> str:
-    """Fondu d'une couleur vers le blanc (fond discret des cellules)."""
+def _tint(color: str, ratio: float = 0.30) -> str:
+    """Fondu d'une couleur vers le fond (teinte discrète des cellules)."""
+    base = (43, 43, 43) if active_theme() == "sombre" else (255, 255, 255)
     try:
         color = str(color or "").strip()
         if len(color) != 7 or not color.startswith("#"):
-            return "#ffffff"
+            return f"#{base[0]:02x}{base[1]:02x}{base[2]:02x}"
         r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
     except ValueError:
-        return "#ffffff"
-    r = round(255 + (r - 255) * ratio)
-    g = round(255 + (g - 255) * ratio)
-    b = round(255 + (b - 255) * ratio)
+        return f"#{base[0]:02x}{base[1]:02x}{base[2]:02x}"
+    r = round(base[0] + (r - base[0]) * ratio)
+    g = round(base[1] + (g - base[1]) * ratio)
+    b = round(base[2] + (b - base[2]) * ratio)
     return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _surface_colors() -> dict[str, str]:
+    """Couleurs de surface adaptées au thème (cellules, légendes)."""
+    if active_theme() == "sombre":
+        return {
+            "bg": "#232323", "alt": "#2a2a2a", "border": "#3a3a3a",
+            "alt_border": "#333333", "text": "#e6e6e6", "dim": "#b8b8b8",
+            "faint": "#9a9a9a", "muted": "#7a7a7a",
+        }
+    return {
+        "bg": "#ffffff", "alt": "#fafafa", "border": "#e4e4e4",
+        "alt_border": "#f0f0f0", "text": "#333333", "dim": "#777777",
+        "faint": "#999999", "muted": "#666666",
+    }
+
+
+def _state_background(color: str) -> str:
+    """Fond d'une cellule de tableau : pastel (clair) ou assombri (sombre)."""
+    return _tint(color, 0.45) if active_theme() == "sombre" else str(color)
+
 
 
 def _draw_markers(painter, points, width: float, lane_top: float,
@@ -2607,8 +2709,8 @@ def _draw_markers(painter, points, width: float, lane_top: float,
     for x_frac, index in points or []:
         y = lane_top + index * lane_step + lane_step / 2.0
         x = max(0.0, min(float(x_frac), 1.0)) * width
-        painter.setPen(QPen(QColor("#444444"), 1.1))
-        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.setPen(QPen(theme_color("#444444", "#cfcfcf"), 1.1))
+        painter.setBrush(QBrush(theme_color("#ffffff", "#232323")))
         painter.drawEllipse(QPointF(x, y), radius, radius)
     painter.setBrush(Qt.NoBrush)
 
@@ -2731,7 +2833,7 @@ class MiniDay(QToolButton):
             font = QFont(painter.font())
             font.setPointSizeF(max(6.0, font.pointSizeF() - 3.0))
             painter.setFont(font)
-            painter.setPen(QPen(QColor("#333333")))
+            painter.setPen(QPen(theme_color("#333333", "#dcdcdc")))
             painter.drawText(QRectF(1, 0, self.width() - 2, 11),
                              Qt.AlignLeft | Qt.AlignVCenter,
                              str(self.day_number))
@@ -2849,7 +2951,7 @@ class DayTimeline(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), theme_color("#ffffff", "#232323"))
         base_font = QFont(painter.font())
         base_font.setPointSizeF(max(7.0, base_font.pointSizeF() - 1.0))
         painter.setFont(base_font)
@@ -2859,34 +2961,35 @@ class DayTimeline(QWidget):
         bottom = top + rows * self.ROW_HEIGHT
         for hour in range(25):
             x = left + (right - left) * hour / 24.0
-            painter.setPen(QPen(QColor("#c8c8c8" if hour % 3 == 0
-                                      else "#ededed")))
+            painter.setPen(QPen(theme_color(
+                "#c8c8c8" if hour % 3 == 0 else "#ededed",
+                "#4a4a4a" if hour % 3 == 0 else "#333333")))
             painter.drawLine(int(x), int(top), int(x), int(bottom))
             if hour % 3 == 0:
-                painter.setPen(QPen(QColor("#666666")))
+                painter.setPen(QPen(theme_color("#666666", "#b0b0b0")))
                 painter.drawText(QRectF(x - 20, 1, 40, self.HEADER - 3),
                                  Qt.AlignCenter, f"{hour} h")
-        painter.setPen(QPen(QColor("#d0d0d0")))
+        painter.setPen(QPen(theme_color("#d0d0d0", "#3a3a3a")))
         painter.drawLine(int(left), int(top), int(right), int(top))
         # selection : bandeau clair sur la ligne choisie
         if 0 <= self.selected < len(self.lanes):
             band = QRectF(left - 4,
                           top + self.selected * self.ROW_HEIGHT + 2,
                           right - left + 8, self.ROW_HEIGHT - 4)
-            painter.fillRect(band, QColor("#dbe8f6"))
+            painter.fillRect(band, theme_color("#dbe8f6", "#31465e"))
         metrics = painter.fontMetrics()
         bold = QFont(base_font)
         bold.setBold(True)
         for index, lane in enumerate(self.lanes):
             y = top + index * self.ROW_HEIGHT + self.ROW_HEIGHT / 2.0
             painter.setFont(bold)
-            painter.setPen(QPen(QColor("#333333")))
+            painter.setPen(QPen(theme_color("#333333", "#e0e0e0")))
             label = metrics.elidedText(str(lane.get("label") or ""),
                                        Qt.ElideRight, int(left) - 30)
             painter.drawText(QRectF(6, y - 17, left - 26, 16),
                              Qt.AlignLeft | Qt.AlignVCenter, label)
             painter.setFont(base_font)
-            painter.setPen(QPen(QColor("#888888")))
+            painter.setPen(QPen(theme_color("#888888", "#a8a8a8")))
             sub = metrics.elidedText(str(lane.get("sub") or ""),
                                      Qt.ElideRight, int(left) - 26)
             painter.drawText(QRectF(6, y + 1, left - 26, 15),
@@ -2908,8 +3011,8 @@ class DayTimeline(QWidget):
             if start is not None:
                 x = self._x(start)
                 if left - 2 <= x <= right + 2:
-                    painter.setPen(QPen(QColor("#333333")))
-                    painter.setBrush(QBrush(QColor("#333333")))
+                    painter.setPen(QPen(theme_color("#333333", "#e0e0e0")))
+                    painter.setBrush(QBrush(theme_color("#333333", "#e0e0e0")))
                     painter.drawEllipse(QPointF(x, y), 4.0, 4.0)
                     painter.setBrush(Qt.NoBrush)
             # demi-vie : un seul point creux (t½), marque la fin de la
@@ -2918,13 +3021,13 @@ class DayTimeline(QWidget):
                 x = self._x(moment)
                 if not (left - 2 <= x <= right + 2):
                     continue
-                painter.setPen(QPen(QColor("#444444"), 1.4))
-                painter.setBrush(QBrush(QColor("#ffffff")))
+                painter.setPen(QPen(theme_color("#444444", "#cfcfcf"), 1.4))
+                painter.setBrush(QBrush(theme_color("#ffffff", "#232323")))
                 painter.drawEllipse(QPointF(x, y), 4.0 if k == 1 else 3.0,
                                     4.0 if k == 1 else 3.0)
                 painter.setBrush(Qt.NoBrush)
                 if k == 1:
-                    painter.setPen(QPen(QColor("#444444")))
+                    painter.setPen(QPen(theme_color("#444444", "#cfcfcf")))
                     painter.drawText(QRectF(x - 22, y - 21, 44, 13),
                                      Qt.AlignCenter, "t½")
         painter.end()
@@ -3024,7 +3127,7 @@ class CalendarEntryDialog(QDialog):
                "connaissez.")
             + " Ce n'est pas une donnée médicale."
         )
-        info.setStyleSheet("color:#666;")
+        info.setStyleSheet("color: palette(mid);")
         layout.addWidget(info)
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self
@@ -3447,17 +3550,18 @@ class CalendarPane(QWidget):
         layout = QHBoxLayout(box)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+        surface = _surface_colors()
         for phase in ("latence", "montée", "plateau", "descente", "élimination"):
             label = QLabel(f"■ {phase}", box)
             label.setStyleSheet(f"color:{PHASE_COLORS[phase]}; font-size:11px;")
             layout.addWidget(label)
         point = QLabel("● prise   ◯ demi-vie (t½)", box)
-        point.setStyleSheet("color:#444; font-size:11px;")
+        point.setStyleSheet(f"color:{surface['text']}; font-size:11px;")
         layout.addWidget(point)
         note = QLabel(
             "effet estimé (durées documentées) ; élimination : jusqu'à "
             f"{ELIM_HALF_LIVES} t½ (≈ estimation)", box)
-        note.setStyleSheet("color:#888; font-size:11px;")
+        note.setStyleSheet(f"color:{surface['faint']}; font-size:11px;")
         layout.addWidget(note)
         layout.addStretch(1)
         return box
@@ -3489,10 +3593,12 @@ class CalendarPane(QWidget):
         layout.addWidget(title, 0, Qt.AlignLeft)
         grid = QGridLayout()
         grid.setSpacing(1)
+        surface = _surface_colors()
         for column, name in enumerate(JOURS_COURT_FR):
             label = QLabel(name, box)
             label.setAlignment(Qt.AlignCenter)
-            label.setStyleSheet("color:#999; font-size:9px;")
+            label.setStyleSheet(
+                f"color:{surface['faint']}; font-size:9px;")
             grid.addWidget(label, 0, column)
         first = QDate(year, month, 1)
         # memes lignes de molecules sur tout le mini-mois (continuite)
@@ -3510,9 +3616,11 @@ class CalendarPane(QWidget):
             button.lanes = self._cell_lanes(day, lane_map, CELL_LANES_YEAR)
             button.points = self._cell_points(day, lane_map, CELL_LANES_YEAR)
             color = self._day_color(day)
-            style = "border:1px solid #dcdcdc; background-color:#ffffff;"
+            surface = _surface_colors()
+            style = (f"border:1px solid {surface['border']}; "
+                     f"background-color:{surface['bg']};")
             if color:
-                style = (f"border:1px solid #c8c8c8; "
+                style = (f"border:1px solid {surface['border']}; "
                          f"background-color:{_tint(color, 0.30)};")
             button.setStyleSheet(style)
             tooltip = f"{day_number} {MOIS_FR[month - 1]} {year}"
@@ -3552,7 +3660,7 @@ class CalendarPane(QWidget):
         for column, name in enumerate(JOURS_COURT_FR):
             label = QLabel(name, box)
             label.setAlignment(Qt.AlignCenter)
-            label.setStyleSheet("color:#777; font-size:11px; font-weight:bold;")
+            label.setStyleSheet("color: palette(mid); font-size:11px; font-weight:bold;")
             grid.addWidget(label, 0, column)
         first = QDate(year, month, 1)
         start_cell = first.addDays(-(first.dayOfWeek() - 1))
@@ -3579,13 +3687,16 @@ class CalendarPane(QWidget):
         cell.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         cell.setMinimumHeight(96)
         color = self._day_color(day)
+        surface = _surface_colors()
         if color:
-            style = (f"border:1px solid #c8c8c8; "
+            style = (f"border:1px solid {surface['border']}; "
                      f"background-color:{_tint(color, 0.30)};")
         elif in_month:
-            style = "border:1px solid #e4e4e4; background-color:#ffffff;"
+            style = (f"border:1px solid {surface['border']}; "
+                     f"background-color:{surface['bg']};")
         else:
-            style = "border:1px solid #f0f0f0; background-color:#fafafa;"
+            style = (f"border:1px solid {surface['alt_border']}; "
+                     f"background-color:{surface['alt']};")
         cell.setStyleSheet(style)
         # bande de lignes (une par molecule) au bas de la cellule
         cell.lanes = self._cell_lanes(day, lane_map, CELL_LANES_MONTH)
@@ -3601,18 +3712,19 @@ class CalendarPane(QWidget):
             f"{day.day()}" + (f"  ({len(entries)})" if entries else ""), cell
         )
         head.setStyleSheet(
-            f"font-weight:bold; color:{'#333333' if in_month else '#b0b0b0'};"
+            f"font-weight:bold; color:{surface['text'] if in_month else surface['faint']};"
         )
         layout.addWidget(head)
         for entry in entries[:2]:
             line = QLabel(self._entry_short(entry), cell)
             line.setStyleSheet(
-                f"font-size:10px; color:{'#222222' if in_month else '#999999'};"
+                f"font-size:10px; color:{surface['text'] if in_month else surface['faint']};"
             )
             layout.addWidget(line)
         if len(entries) > 2:
             more = QLabel(f"+{len(entries) - 2}", cell)
-            more.setStyleSheet("font-size:10px; color:#666666;")
+            more.setStyleSheet(
+                f"font-size:10px; color:{surface['muted']};")
             layout.addWidget(more)
         layout.addStretch(1)
         tooltip = _fmt_date_longue(
@@ -3875,6 +3987,37 @@ def _nice_number(value: float) -> float:
     return 10.0 * base
 
 
+def _log_floor(y_max: float) -> float:
+    """Plancher d'une echelle logarithmique (0 interdit) : ~0,5 % du pic."""
+    return max(float(y_max) * 0.005, 1e-9)
+
+
+def _ypix_log(rect: QRectF, value: float, y_max: float) -> float:
+    """Ordonnee d'une valeur en echelle logarithmique (pic en haut)."""
+    floor = _log_floor(y_max)
+    span = math.log(max(y_max, floor * 1.0000001) / floor)
+    value = max(float(value), floor)
+    frac = math.log(value / floor) / span if span > 0 else 0.0
+    return rect.bottom() - rect.height() * max(0.0, min(1.0, frac))
+
+
+def _log_grid_values(y_max: float) -> list[float]:
+    """Graduations 1-2-5 par decennie, entre le plancher et le pic."""
+    floor = _log_floor(y_max)
+    values: list[float] = []
+    exp = math.floor(math.log10(floor))
+    limit = int(math.ceil(math.log10(max(y_max, floor * 10)))) + 1
+    for _ in range(max(1, limit + 2)):
+        base = 10.0 ** exp
+        for multiple in (1.0, 2.0, 5.0):
+            value = multiple * base
+            if floor <= value <= y_max:
+                values.append(value)
+        exp += 1
+    return values or [y_max]
+
+
+
 def _fmt_heures(hours: float) -> str:
     text = f"{hours:g}"
     return text.replace(".", ",") + " h"
@@ -3920,12 +4063,19 @@ class PkChart(QWidget):
         super().__init__(parent)
         self.series: list[dict] = []
         self.selected = -1
+        self.log_scale = False
         self.setMinimumSize(420, 280)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     def set_series(self, series) -> None:
         self.series = list(series or [])
         self.update()
+
+    def set_log_scale(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled != self.log_scale:
+            self.log_scale = enabled
+            self.update()
 
     def set_selected(self, index: int) -> None:
         index = int(index)
@@ -3988,20 +4138,20 @@ class PkChart(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.fillRect(self.rect(), theme_color("#ffffff", "#232323"))
         rect = self._plot_rect()
         font = QFont(painter.font())
         font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
         painter.setFont(font)
         metrics = painter.fontMetrics()
-        painter.setPen(QPen(QColor("#333333")))
+        painter.setPen(QPen(theme_color("#333333", "#d0d0d0")))
         painter.drawLine(QPointF(rect.left(), rect.top()),
                          QPointF(rect.left(), rect.bottom()))
         painter.drawLine(QPointF(rect.left(), rect.bottom()),
                          QPointF(rect.right(), rect.bottom()))
         visible = self._visible_series()
         if not visible:
-            painter.setPen(QPen(QColor("#888888")))
+            painter.setPen(QPen(theme_color("#888888", "#9a9a9a")))
             message = ("Entrez une molécule et sa dose, puis « Tracer »."
                        if not self.series else
                        "Toutes les courbes sont masquées.")
@@ -4011,6 +4161,8 @@ class PkChart(QWidget):
         if not bounds:
             return
         x_max, y_max = bounds
+        # une courbe de reference (Boddy) : le pic vaut 1 -> utile en echelle
+        # logarithmique, ou l'axe ne peut pas partir de zero
 
         # au-dela de deux jours, l'axe des temps passe en jours : les
         # demi-vies longues (fluoxetine) restent lisibles
@@ -4021,6 +4173,8 @@ class PkChart(QWidget):
             return rect.left() + rect.width() * hours / x_max
 
         def ypix(value: float) -> float:
+            if self.log_scale:
+                return _ypix_log(rect, value, y_max)
             return rect.bottom() - rect.height() * value / y_max
 
         step_x = _nice_step(x_max / diviseur / 8.0,
@@ -4028,26 +4182,32 @@ class PkChart(QWidget):
         marque = 0.0
         while marque * diviseur <= x_max + 1e-9:
             x = xpix(marque * diviseur)
-            painter.setPen(QPen(QColor("#e4e4e4")))
+            painter.setPen(QPen(theme_color("#e4e4e4", "#3a3a3a")))
             painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
-            painter.setPen(QPen(QColor("#666666")))
+            painter.setPen(QPen(theme_color("#666666", "#a8a8a8")))
             libelle = (f"{marque:g} j" if jours else _fmt_heures(marque))
             painter.drawText(QRectF(x - 26, rect.bottom() + 2, 52, 18),
                              Qt.AlignmentFlag.AlignCenter, libelle)
             marque += step_x
-        step_y = _nice_number(y_max / 4.0)
-        value = 0.0
-        while value <= y_max + 1e-9:
+        if self.log_scale:
+            graduations = _log_grid_values(y_max)
+        else:
+            step_y = _nice_number(y_max / 4.0)
+            graduations = []
+            value = 0.0
+            while value <= y_max + 1e-9:
+                graduations.append(value)
+                value += step_y
+        for value in graduations:
             y = ypix(value)
-            painter.setPen(QPen(QColor("#e4e4e4")))
+            painter.setPen(QPen(theme_color("#e4e4e4", "#3a3a3a")))
             painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
-            painter.setPen(QPen(QColor("#666666")))
+            painter.setPen(QPen(theme_color("#666666", "#a8a8a8")))
             painter.drawText(QRectF(2, y - 9, self.MARGIN_LEFT - 8, 18),
                              Qt.AlignmentFlag.AlignRight
                              | Qt.AlignmentFlag.AlignVCenter,
                              _fmt_valeur(value))
-            value += step_y
-        painter.setPen(QPen(QColor("#333333")))
+        painter.setPen(QPen(theme_color("#333333", "#d0d0d0")))
         painter.drawText(QRectF(rect.left(), rect.bottom() + 22,
                                 rect.width(), 18),
                          Qt.AlignmentFlag.AlignHCenter,
@@ -4058,7 +4218,8 @@ class PkChart(QWidget):
         painter.rotate(-90)
         painter.drawText(QRectF(-rect.height() / 2, -10, rect.height(), 20),
                          Qt.AlignmentFlag.AlignCenter,
-                         "Concentration relative (u.a.)")
+                         "Concentration relative (u.a.)"
+                         + (" — échelle log" if self.log_scale else ""))
         painter.restore()
         # courbe selectionnee dessinee en dernier (au-dessus) et epaisse, les
         # autres en trait fin et semi-transparent
@@ -4097,8 +4258,8 @@ class PkChart(QWidget):
                                          len(serie["values"]) - 1))
                 point = QPointF(xpix(half / 60.0),
                                 ypix(serie["values"][point_index]))
-                painter.setPen(QPen(QColor("#333333"), 1.1))
-                painter.setBrush(QBrush(QColor("#ffffff")))
+                painter.setPen(QPen(theme_color("#333333", "#d0d0d0"), 1.1))
+                painter.setBrush(QBrush(theme_color("#ffffff", "#232323")))
                 painter.drawEllipse(point, 4.0, 4.0)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawText(QRectF(point.x() - 30, point.y() - 20, 60, 14),
@@ -4110,7 +4271,7 @@ class PkChart(QWidget):
                                 3.0 if choisi else 1.8))
             painter.drawLine(QPointF(rect.right() - 140, y + 7),
                              QPointF(rect.right() - 118, y + 7))
-            painter.setPen(QPen(QColor("#333333")))
+            painter.setPen(QPen(theme_color("#333333", "#e0e0e0")))
             text = metrics.elidedText(str(serie.get("label") or ""),
                                       Qt.TextElideMode.ElideRight, 112)
             painter.drawText(QRectF(rect.right() - 114, y, 112, 16),
@@ -4165,7 +4326,7 @@ class PharmacoPane(QWidget):
 
         self.message = QLabel("", left)
         self.message.setWordWrap(True)
-        self.message.setStyleSheet("color: #a03030;")
+        self.message.setStyleSheet("color: #d05555;")
         column.addWidget(self.message)
 
         column.addWidget(QLabel("Courbes tracées", left))
@@ -4306,7 +4467,8 @@ class PharmacoPane(QWidget):
         visible = serie.get("visible", True)
         item.setCheckState(Qt.CheckState.Checked if visible
                            else Qt.CheckState.Unchecked)
-        item.setForeground(QBrush(QColor("#202020" if visible else "#9a9a9a")))
+        item.setForeground(QBrush(theme_color("#202020" if visible else "#9a9a9a",
+                                             "#e6e6e6" if visible else "#7a7a7a")))
 
     def _refresh(self, select=None) -> None:
         current = self.list.currentRow() if select is None else select
@@ -4483,6 +4645,7 @@ class MainWindow(QMainWindow):
         self._task: Task | None = None
         self._workers: list[Worker] = []
         self.settings = QSettings(ORG_NAME, APP_NAME)
+        self._apply_saved_theme()
 
         self.workspace = WorkspacePane(Path.cwd())
         self.tabs = QTabWidget(self)
@@ -4736,6 +4899,12 @@ class MainWindow(QMainWindow):
         page_pk.triggered.connect(lambda: self.show_page(4))
         view_menu.addAction(page_pk)
         view_menu.addAction(page_cal)
+        view_menu.addSeparator()
+        self.theme_action = QAction("Thème sombre", self, checkable=True)
+        self.theme_action.setToolTip("Bascule entre thème clair et thème sombre.")
+        self.theme_action.setChecked(active_theme() == "sombre")
+        self.theme_action.toggled.connect(self._theme_toggled)
+        view_menu.addAction(self.theme_action)
 
         help_menu = self.menuBar().addMenu("&Aide")
         about = QAction("À propos", self)
@@ -4744,6 +4913,39 @@ class MainWindow(QMainWindow):
 
     def _about(self) -> None:
         QMessageBox.information(self, f"À propos de {APP_NAME}", DISCLAIMER)
+
+    # -- theme -----------------------------------------------------------
+    def _apply_saved_theme(self) -> None:
+        """Applique le thème enregistré avant de construire les volets."""
+        mode = str(self.settings.value(THEME_SETTING, "clair"))
+        apply_theme(QApplication.instance(), mode)
+
+    def _theme_toggled(self, dark: bool) -> None:
+        mode = "sombre" if dark else "clair"
+        apply_theme(QApplication.instance(), mode)
+        self.settings.setValue(THEME_SETTING, mode)
+        self._refresh_theme()
+
+    def _refresh_theme(self) -> None:
+        """Repeint les vues dont le style dépend du thème."""
+        action = getattr(self, "theme_action", None)
+        if action is not None:
+            wanted = active_theme() == "sombre"
+            if action.isChecked() != wanted:
+                action.blockSignals(True)
+                action.setChecked(wanted)
+                action.blockSignals(False)
+        for widget in (self.workspace, self.compare, self.interactions,
+                       self.calendar, self.pharmaco, self.summary):
+            widget.update()
+        rows = getattr(self.compare, "rows", None)
+        if rows is not None:
+            self.compare.show_rows(rows)
+        rows = getattr(self.interactions, "rows", None)
+        if rows is not None:
+            self.interactions.show_rows(rows)
+        if getattr(self.calendar, "entries", None):
+            self.calendar._rebuild()
 
     def _edit_synonyms(self) -> None:
         """Ouvre l'éditeur de la table d'alias DDInter (synonyms.json)."""
