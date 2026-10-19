@@ -1652,7 +1652,8 @@ class ComparePane(QWidget):
 
     Chaque ligne donne l'etat de la molecule sur le disque (disponible,
     absente, en file, telechargement…, echec) puis ses champs de
-    `rm.TARGET_ORDER` lus dans resume.json (doublon, tooltip complet).
+    `rm.COMPARE_ORDER` (classification, dosage, pharmacocinetique,
+    toxicite) lus dans resume.json (doublon, tooltip complet).
     Le tableau ne contient que des donnees locales : aucun acces reseau ici.
     """
 
@@ -1684,9 +1685,8 @@ class ComparePane(QWidget):
             ("Molécule", "__name"),
             ("État", "__state"),
         ]
-        for key in rm.TARGET_ORDER:
-            if key != "name":
-                self.columns.append((rm.LABELS_FR.get(key, key), key))
+        for key in rm.COMPARE_ORDER:
+            self.columns.append((rm.LABELS_FR.get(key, key), key))
         try:
             self._hidden: set[str] = set(
                 json.loads(str(self.settings.value("compare_columns", "[]")))

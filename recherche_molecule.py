@@ -149,6 +149,9 @@ LABELS_FR: dict[str, str] = {
     "offset": "Redescente / offset",
     "bioavailability": "Biodisponibilité",
     "halflife": "Demi-vie (half-life)",
+    "protein_binding": "Liaison protéique (protein binding)",
+    "metabolism": "Métabolisme (metabolism)",
+    "metabolites": "Métabolites (metabolites)",
     "addiction": "Potentiel addictif / dépendance",
     "tolerance": "Tolérance",
     "cross_tolerance": "Tolérance croisée",
@@ -178,6 +181,16 @@ TARGET_ORDER: list[str] = [
     "psychoactive_class", "routes", "dosage", "onset", "comeup", "peak",
     "duration", "offset", "bioavailability", "halflife", "addiction",
     "tolerance", "cross_tolerance", "toxicity", "effects", "interactions",
+]
+
+# Ordre des colonnes du tableau de comparaison (page « Comparaison »).
+# Les champs qui n'y figurent pas (voies, duree totale, effets, interactions,
+# tolerance, noms secondaires...) restent disponibles dans le resume et pour
+# les interactions locales, mais ne sont pas affiches en colonnes.
+COMPARE_ORDER: list[str] = [
+    "chemical_class", "psychoactive_class", "dosage",
+    "halflife", "bioavailability", "protein_binding", "metabolism",
+    "metabolites", "onset", "comeup", "peak", "offset", "toxicity",
 ]
 
 # Cles calculees mais jamais affichees telles quelles (presentes dans le JSON)
@@ -748,6 +761,11 @@ FIELD_RULES: list[tuple[str, list[str]]] = [
     ("peak", ["peak", "tmax", "timetopeak", "time to peak", "peakplasma"]),
     ("duration", ["duration", "durationofaction", "totalduration"]),
     ("bioavailability", ["bioavailability", "oralbioavailability"]),
+    ("protein_binding", [
+        "proteinbinding", "protein binding", "plasmaproteinbinding",
+    ]),
+    ("metabolism", ["metabolism", "metabolizedby", "metabolicpathways"]),
+    ("metabolites", ["metabolites", "activemetabolites"]),
     ("toxicity", ["toxicity", "lethaldose", "ld50", "overdose"]),
     ("addiction", ["addictionpotential", "dependencepotential", "addiction"]),
     ("legal", ["legalstatus", "legality", "legal status"]),
@@ -1317,6 +1335,20 @@ def build_pharmacology(
         wiki_fields.setdefault(k, v)
     for k, v in wiki_scan.items():
         wiki_fields.setdefault(k, v)
+
+    # Wikipedia : lignes des encadres en sections (ex. « Pharmacokinetic
+    # data » : bioavailability, protein binding, metabolism, half-life...).
+    # Ces tableaux ne passent pas par les champs plats ni par le wikitext
+    # quand l'infobox est rendue en sections.
+    for rows in wiki_infobox.sections.values():
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) != 2:
+                continue
+            label, value = row
+            if not str(label).strip() or not str(value).strip():
+                continue
+            for key, val in map_infobox({str(label): str(value)}).items():
+                wiki_fields.setdefault(key, val)
 
     result: dict[str, dict[str, str]] = {}
     # champs cibles a afficher, dans l'ordre desire (TARGET_ORDER)

@@ -14,7 +14,10 @@ Projet Python qui, pour une molécule donnée :
 3. Récupère la **page Wikipedia en langue anglaise** (API MediaWiki de
    `en.wikipedia.org`, avec la librairie de Goldsmith `wikipedia` si
    disponible, sinon appel direct à l'API) pour compléter (statut légal,
-   toxicité détaillée, chimie…).
+   toxicité détaillée, chimie…), y compris les lignes du tableau
+   « Pharmacokinetic data » de l'infobox : liaison protéique
+   (*protein binding*), métabolisme, métabolites, demi-vie,
+   biodisponibilité.
 4. Fusionne et affiche les informations pharmacologiques les plus
    importantes : dosage, voie(s) d'administration, temps d'apparition
    (*onset*), pic plasmatique (*Tmax / peak*), demi-vie,
@@ -324,10 +327,20 @@ La fenêtre comporte trois onglets permanents en haut :
 
 * **Recherche** — les trois volets habituels (explorateur, lecteur, résumé) ;
 * **Comparaison** — l'explorateur + un tableau comparatif remplaçant le
-  lecteur et le volet résumé : **1 ligne par molécule**, colonnes = champs
-  du tableau unifié (`TARGET_ORDER`) lus dans les `resume.json` (classes,
-  voies, dosage, onset, durée, demi-vie, addiction, tolérance, tolérance
-  croisée, toxicité, effets, interactions…) ;
+  lecteur et le volet résumé : **1 ligne par molécule**, colonnes =
+  `COMPARE_ORDER` lues dans les `resume.json`, dans cet ordre : **nom**,
+  **état** (disque : disponible, absente, en file…), classification
+  chimique, classification psychoactive, dosage, puis les données
+  pharmacocinétiques (demi-vie, biodisponibilité, liaison protéique /
+  *protein binding*, métabolisme, métabolites, onset, come-up, Tmax / peak,
+  offset), pour finir par la **toxicité**. Les autres champs du tableau
+  unifié (`TARGET_ORDER` : voies, durée totale, addiction, tolérance,
+  tolérance croisée, effets, interactions…) restent présents dans les
+  `resume.json` et alimentent notamment les interactions locales, mais ne
+  sont pas affichés en colonnes. Pour chaque cellule, la valeur fusionnée
+  `pharmacology` est lue en premier, puis les champs bruts PsychonautWiki,
+  puis l'infobox Wikipedia (utile quand un `resume.json` a été généré sans
+  section `pharmacology`) ;
 * **Interactions** — le croisement des interactions entre plusieurs
   molécules (voir plus bas).
 

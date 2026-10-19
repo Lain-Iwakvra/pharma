@@ -326,12 +326,72 @@ def _flatten_value(value) -> str:
     return str(value).strip()
 
 
+# Libelles d'infobox Wikipedia -> cles de champs pharmacologiques. Sert de
+# dernier repli quand le resume n'a pas encore ces champs fusionnes (fichiers
+# generes avant l'extraction, ou generation partielle) : les donnees sont
+# pourtant presentes dans `wikipedia_infobox`.
+_WIKI_FIELD_LABELS: dict[str, tuple[str, ...]] = {
+    "halflife": ("half-life", "half life", "halflife"),
+    "bioavailability": ("bioavailability",),
+    "protein_binding": ("protein binding", "plasma protein binding"),
+    "metabolism": ("metabolism",),
+    "metabolites": ("metabolites",),
+}
+
+
+def _wiki_infobox_values(data: dict) -> dict[str, str]:
+    """{libelle normalise: valeur} de l'infobox Wikipedia d'un resume.
+
+    Regroupe les champs plats (`wikipedia_infobox["fields"]`) et les lignes
+    des encadres en sections (`wikipedia_infobox["sections"]`, ex.
+    « Pharmacokinetic data ») sous forme de paires libelle/valeur.
+    """
+    infobox = data.get("wikipedia_infobox")
+    if not isinstance(infobox, dict):
+        return {}
+    out: dict[str, str] = {}
+
+    def _add(label, value) -> None:
+        text = _flatten_value(value)
+        name = rm.fold_accents(str(label or "")).casefold().strip()
+        if name and text:
+            out.setdefault(name, text)
+
+    fields = infobox.get("fields")
+    if isinstance(fields, dict):
+        for label, value in fields.items():
+            _add(label, value)
+    sections = infobox.get("sections")
+    if isinstance(sections, dict):
+        for rows in sections.values():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if isinstance(row, (list, tuple)) and len(row) == 2:
+                    _add(row[0], row[1])
+    return out
+
+
+def _wiki_value(values: dict[str, str], key: str) -> str:
+    """Valeur d'infobox correspondant a une cle de champ, ou « »."""
+    for label in _WIKI_FIELD_LABELS.get(key, ()):
+        needle = rm.fold_accents(label).casefold()
+        for candidate, value in values.items():
+            if needle in candidate:
+                return value
+    return ""
+
+
 def comparison_rows(root: Path) -> list[dict]:
     """Une entree par molecule du travail, pour le tableau de comparaison.
 
-    Champs = `rm.TARGET_ORDER` (hors « name ») lus dans `resume.json` :
-    la valeur fusionnee `pharmacology[champ]["value"]` d'abord, avec repli
-    sur les champs bruts PsychonautWiki (classes, effets, voies...).
+    Champs = `rm.TARGET_ORDER` (hors « name ») et `rm.COMPARE_ORDER` lus dans
+    `resume.json` : la valeur fusionnee `pharmacology[champ]["value"]`
+    d'abord, avec repli sur les champs bruts PsychonautWiki (classes, effets,
+    voies...), puis sur l'infobox Wikipedia (demi-vie, liaison proteique,
+    metabolisme...). `TARGET_ORDER` reste couvert en entier car le champ
+    « interactions » sert aux interactions locales, meme s'il n'est plus
+    affiche en colonne.
     Chaque entree : {"name", "path", "fields": {champ: texte}}. Un resume
     illisible est ignore.
     """
@@ -364,7 +424,11 @@ def comparison_rows(root: Path) -> list[dict]:
         if not isinstance(pw, dict):
             pw = {}
         fields: dict[str, str] = {}
-        for key in rm.TARGET_ORDER:
+        wiki_values = _wiki_infobox_values(data)
+        # TARGET_ORDER reste couvert en entier (le champ « interactions »
+        # alimente les interactions locales) ; ses champs non listes plus la
+        # liste des colonnes de comparaison ne sont pas affiches.
+        for key in dict.fromkeys(list(rm.TARGET_ORDER) + list(rm.COMPARE_ORDER)):
             if key == "name":
                 continue
             value = ""
@@ -381,6 +445,8 @@ def comparison_rows(root: Path) -> list[dict]:
                             raw = pw.get(cand)
                             break
                 value = _flatten_value(raw)
+            if not value:  # dernier repli : infobox Wikipedia du resume
+                value = _wiki_value(wiki_values, key)
             if value:
                 fields[key] = value
         out.append({
