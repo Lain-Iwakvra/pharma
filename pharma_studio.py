@@ -3185,6 +3185,7 @@ class CalendarPane(QWidget):
     editRequested = Signal(object)
     removeRequested = Signal(object)
     curveRequested = Signal(object)
+    dayCurvesRequested = Signal(object)
     refreshRequested = Signal()
     pathDropped = Signal(object)
     saveRequested = Signal()
@@ -3772,11 +3773,17 @@ class CalendarPane(QWidget):
         add.clicked.connect(self.addRequested)
         self._day_edit = QPushButton("Modifier…", box)
         self._day_edit.clicked.connect(self._edit_selected)
+        self._day_curves = QPushButton("Courbes du jour…", box)
+        self._day_curves.setToolTip(
+            "Superpose sur la page Pharmacocinétique toutes les prises de "
+            "ce jour.")
+        self._day_curves.clicked.connect(self._day_curves_selected)
         self._day_remove = QPushButton("Supprimer", box)
         self._day_remove.clicked.connect(self._remove_selected)
         self.day_list.removeRequested.connect(self._remove_selected)
         buttons.addWidget(add)
         buttons.addWidget(self._day_edit)
+        buttons.addWidget(self._day_curves)
         buttons.addWidget(self._day_remove)
         buttons.addStretch(1)
         side.addLayout(buttons)
@@ -3894,6 +3901,9 @@ class CalendarPane(QWidget):
         menu.addAction("Courbe pharmacocinétique…").triggered.connect(
             lambda: self._curve_item(item)
         )
+        menu.addAction("Courbes du jour (superposées)…").triggered.connect(
+            lambda: self._day_curves_item(item)
+        )
         menu.addSeparator()
         menu.addAction("Modifier…").triggered.connect(
             lambda: self._edit_item(item)
@@ -3907,6 +3917,21 @@ class CalendarPane(QWidget):
         entry = item.data(Qt.UserRole) if item is not None else None
         if entry:
             self.curveRequested.emit(entry)
+
+    def _day_curves_item(self, item) -> None:
+        """Superpose sur la page Pharmacocinétique toutes les prises du jour."""
+        entry = item.data(Qt.UserRole) if item is not None else None
+        if entry:
+            self.dayCurvesRequested.emit(entry)
+
+    def _day_curves_selected(self) -> None:
+        item = self._selected_item()
+        entry = item.data(Qt.UserRole) if item is not None else None
+        if not entry:
+            entries = self._entries_of_day(self.day)
+            entry = entries[0] if entries else None
+        if entry:
+            self.dayCurvesRequested.emit(entry)
 
     def _curve_lane(self, index: int) -> None:
         lanes = self._day_lanes or []
@@ -4350,6 +4375,13 @@ class PharmacoPane(QWidget):
         actions.addWidget(self.remove_button)
         column.addLayout(actions)
 
+        self.log_check = QCheckBox("Échelle logarithmique (axe vertical)", left)
+        self.log_check.setToolTip(
+            "Axe vertical logarithmique : les fins de courbe (élimination "
+            "lente) restent lisibles.")
+        self.log_check.toggled.connect(self._log_toggled)
+        column.addWidget(self.log_check)
+
         # touche Suppr / Retour arriere : supprime la courbe selectionnee
         for sequence in (QKeySequence.StandardKey.Delete,
                          QKeySequence(Qt.Key.Key_Backspace)):
@@ -4390,6 +4422,10 @@ class PharmacoPane(QWidget):
     def _request(self) -> None:
         self.traceRequested.emit(self.molecule.text().strip(),
                                  self.dose.text().strip())
+
+    def _log_toggled(self, enabled: bool) -> None:
+        """Active / désactive l'échelle logarithmique de l'axe vertical."""
+        self.chart.set_log_scale(enabled)
 
     def clear(self) -> None:
         self.series = []
@@ -4567,7 +4603,11 @@ class PharmacoPane(QWidget):
             "sélectionne aussi) ; sa <b>case</b> ou le bouton "
             "<b>Afficher / masquer</b> l'affiche ou la masque ; le bouton "
             "<b>Retirer</b> ou la touche <b>Suppr</b> la supprime.<br>"
-            "Double-cliquer une prise du calendrier ouvre sa courbe."
+            "L'<b>échelle logarithmique</b> (case à cocher) étale les fins de "
+            "courbe (élimination lente).<br>"
+            "Double-cliquer une prise du calendrier ouvre sa courbe ; le "
+            "bouton <b>Courbes du jour…</b> du calendrier superpose toutes "
+            "les prises d'une même journée."
         )
 
     @staticmethod
@@ -4750,6 +4790,7 @@ class MainWindow(QMainWindow):
         self.calendar.loadRequested.connect(self._calendar_load_file)
         self.calendar.clearRequested.connect(self._calendar_clear)
         self.calendar.curveRequested.connect(self._calendar_curve)
+        self.calendar.dayCurvesRequested.connect(self._calendar_day_curves)
         self.calendar_splitter = QSplitter(Qt.Horizontal, self)
         self.calendar_splitter.addWidget(self.calendar)
         self.calendar_splitter.setStretchFactor(0, 1)
@@ -5831,6 +5872,23 @@ class MainWindow(QMainWindow):
         self.pharmaco.set_inputs(entry["molecule"], entry.get("dose", ""))
         self._pharmaco_trace(entry["molecule"], entry.get("dose", ""),
                              start=entry.get("start"))
+
+    def _calendar_day_curves(self, entry) -> None:
+        """Superpose les courbes de toutes les prises d'un même jour."""
+        entry = sb.normalise_entry(entry)
+        start = str(entry.get("start") or "")
+        day = start[:10]
+        same_day = [e for e in self._calendar_items()
+                    if str(e.get("start") or "")[:10] == day]
+        if not same_day:
+            same_day = [entry]
+        self.show_page(4)
+        for item in same_day:
+            self._pharmaco_trace(item["molecule"], item.get("dose", ""),
+                                 start=item.get("start"))
+        self.pharmaco.message.setText(
+            f"{len(same_day)} prise(s) du {day} superposée(s) — courbes "
+            "estimées, non comparables entre molécules.")
 
     def _pharmaco_add_from_tree(self, path) -> None:
         """Dépôt d'un dossier/fichier de molécule : trace sa courbe."""
