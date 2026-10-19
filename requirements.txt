@@ -1,0 +1,9 @@
+# Bibliotheque de recherche + application de bureau
+requests>=2.31.0
+wikipedia>=1.4.0
+beautifulsoup4>=4.12.0
+
+# Application de bureau (pharma_studio.py)
+# PySide6 fournit QtPdf / QtPdfWidgets (lecteur PDF integre), le rendu
+# HTML -> PDF des pages PsychonautWiki, et les dialogues d'ajout.
+PySide6>=6.6.0
