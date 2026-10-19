@@ -27,8 +27,10 @@ Lancement :
 Rappel : outil de recherche documentaire. Ni avis medical, ni conseil de
 dosage. La page « Calendrier » tient un simple journal personnel des prises
 (molecule, date, dose) : elle enregistre ce que l'utilisateur saisit et
-estime la duree d'effet d'apres les durees documentees ; elle ne propose
-aucune posologie.
+represente la duree d'effet estimee d'apres les durees documentees — une
+ligne par prise, aux echelles annee / mois / jour — prolongee jusqu'a
+5 demi-vies lorsque la demi-vie est documentee ; elle ne propose aucune
+posologie.
 """
 
 from __future__ import annotations
@@ -2431,11 +2433,35 @@ PHASE_COLORS = {
     "descente": "#9fc5e8",
     "durée indiquée": "#b4a7d6",
     "durée documentée": "#b4a7d6",
+    # elimination (pas un effet : la substance s'elimine) : ligne claire
+    "élimination": "#a9a9a9",
 }
 PHASE_RANKS = {
-    "latence": 1, "montée": 2, "durée indiquée": 2, "durée documentée": 2,
-    "descente": 3, "plateau": 4,
+    "latence": 1, "élimination": 1, "montée": 2, "durée indiquée": 2,
+    "durée documentée": 2, "descente": 3, "plateau": 4,
 }
+
+# La ligne d'une prise va jusqu'a ce nombre de demi-vies au-dela des phases
+# documentees : 5 demi-vies = ~97 % elimine (convention courante).
+ELIM_HALF_LIVES = 5
+# nombre maximum de lignes dessinees par cellule de mois / mini-journee
+CELL_LANES_MONTH = 5
+CELL_LANES_YEAR = 3
+
+
+def _tint(color: str, ratio: float = 0.22) -> str:
+    """Fondu d'une couleur vers le blanc (fond discret des cellules)."""
+    try:
+        color = str(color or "").strip()
+        if len(color) != 7 or not color.startswith("#"):
+            return "#ffffff"
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    except ValueError:
+        return "#ffffff"
+    r = round(255 + (r - 255) * ratio)
+    g = round(255 + (g - 255) * ratio)
+    b = round(255 + (b - 255) * ratio)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def _fmt_heure(moment: datetime) -> str:
@@ -2468,14 +2494,89 @@ def _fmt_date_longue(iso: str) -> str:
 
 
 class ClickableFrame(QFrame):
-    """Cadre cliquable (cellule de calendrier)."""
+    """Cadre cliquable (cellule de calendrier).
+
+    Peut dessiner les lignes d'effet des molecules : `lanes` est une liste de
+    lignes, chacune une liste de segments `(debut, fin, couleur)` en fractions
+    de la largeur de la cellule (0.0 -> 24 h). Le fond reste celui du
+    stylesheet (base dessinee avant).
+    """
 
     clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.lanes: list[list[tuple[float, float, str]]] = []
+        self.lane_top = 0
+        self.lane_step = 5
+        self.lane_width = 4
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - API Qt
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
+        super().paintEvent(event)
+        if not self.lanes:
+            return
+        painter = QPainter(self)
+        width = float(self.width())
+        for index, lane in enumerate(self.lanes):
+            if not lane:
+                continue
+            y = self.lane_top + index * self.lane_step + self.lane_step / 2.0
+            for x1, x2, color in lane:
+                left = max(0.0, min(x1, 1.0)) * width
+                right = max(0.0, min(x2, 1.0)) * width
+                if right - left < 2.0:
+                    right = left + 2.0
+                pen = QPen(QColor(color), self.lane_width)
+                pen.setCapStyle(Qt.FlatCap)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(left, y), QPointF(right, y))
+        painter.end()
+
+
+class MiniDay(QToolButton):
+    """Journee d'un mini-mois : chiffre en haut, lignes d'effet en bas."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setText("")
+        self.setAutoRaise(True)
+        self.lanes: list[list[tuple[float, float, str]]] = []
+        self.lane_top = 12
+        self.lane_step = 4
+        self.lane_width = 3
+        self.day_number = 0
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
+        super().paintEvent(event)
+        painter = QPainter(self)
+        if self.day_number:
+            font = QFont(painter.font())
+            font.setPointSizeF(max(6.0, font.pointSizeF() - 3.0))
+            painter.setFont(font)
+            painter.setPen(QPen(QColor("#333333")))
+            painter.drawText(QRectF(1, 0, self.width() - 2, 11),
+                             Qt.AlignLeft | Qt.AlignVCenter,
+                             str(self.day_number))
+        width = float(self.width())
+        for index, lane in enumerate(self.lanes):
+            if not lane:
+                continue
+            y = self.lane_top + index * self.lane_step + self.lane_step / 2.0
+            for x1, x2, color in lane:
+                left = max(0.0, min(x1, 1.0)) * width
+                right = max(0.0, min(x2, 1.0)) * width
+                if right - left < 1.5:
+                    right = left + 1.5
+                pen = QPen(QColor(color), self.lane_width)
+                pen.setCapStyle(Qt.FlatCap)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(left, y), QPointF(right, y))
+        painter.end()
 
 
 class DayTimeline(QWidget):
@@ -2484,10 +2585,14 @@ class DayTimeline(QWidget):
     Le temps court de gauche a droite. Chaque prise occupe sa propre ligne :
     les lignes sont donc paralleles, ce qui permet de comparer plusieurs
     molecules le meme jour. Une phase d'effet est un segment colore de la
-    ligne (latence, montee, plateau, descente) ; la prise est marquee d'un
-    point plein, la demi-vie documentee d'un point creux (t½, puis ses
-    multiples). Les prises qui debordent de la journee sont tronquees au
-    cadre.
+    ligne (latence, montee, plateau, descente), prolonge d'une ligne claire
+    d'elimination jusqu'a `ELIM_HALF_LIVES` demi-vies. La prise est marquee
+    d'un point plein, la demi-vie d'un seul point creux (t½). Les prises qui
+    debordent de la journee sont tronquees au cadre.
+
+    Un clic sur une ligne selectionne la prise correspondante
+    (`laneClicked`), qui surligne alors la ligne et sa valeur dans la liste ;
+    la selection est reversible depuis la liste (`selected`).
     """
 
     ROW_HEIGHT = 40
@@ -2496,19 +2601,41 @@ class DayTimeline(QWidget):
     LINE_WIDTH = 6
     HOUR_WIDTH = 28
 
+    laneClicked = Signal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.day = QDate.currentDate()
-        # une « voie » par prise : {label, sub, start, segments, halflives}
+        # une « voie » par prise : {label, sub, start, segments, halflives,
+        # entry}
         self.lanes: list[dict] = []
+        self.selected = -1
         self.setMinimumWidth(self.GUTTER + 24 * self.HOUR_WIDTH)
         self._resize_height()
 
     def set_day_lanes(self, day: QDate, lanes) -> None:
         self.day = QDate(day)
         self.lanes = list(lanes or [])
+        if not 0 <= self.selected < len(self.lanes):
+            self.selected = -1
         self._resize_height()
         self.update()
+
+    def lane_at(self, y: float) -> int:
+        """Index de la ligne sous une ordonnee, ou -1."""
+        index = int((y - self.HEADER) // self.ROW_HEIGHT)
+        if 0 <= index < len(self.lanes):
+            return index
+        return -1
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - API Qt
+        if event.button() == Qt.LeftButton:
+            index = self.lane_at(float(event.position().y()))
+            if index >= 0:
+                self.selected = index
+                self.update()
+                self.laneClicked.emit(index)
+        super().mousePressEvent(event)
 
     def _resize_height(self) -> None:
         rows = max(1, len(self.lanes))
@@ -2546,6 +2673,12 @@ class DayTimeline(QWidget):
                                  Qt.AlignCenter, f"{hour} h")
         painter.setPen(QPen(QColor("#d0d0d0")))
         painter.drawLine(int(left), int(top), int(right), int(top))
+        # selection : bandeau clair sur la ligne choisie
+        if 0 <= self.selected < len(self.lanes):
+            band = QRectF(left - 4,
+                          top + self.selected * self.ROW_HEIGHT + 2,
+                          right - left + 8, self.ROW_HEIGHT - 4)
+            painter.fillRect(band, QColor("#dbe8f6"))
         metrics = painter.fontMetrics()
         bold = QFont(base_font)
         bold.setBold(True)
@@ -2564,13 +2697,14 @@ class DayTimeline(QWidget):
             painter.drawText(QRectF(6, y + 1, left - 26, 15),
                              Qt.AlignLeft | Qt.AlignVCenter, sub)
             # phases : segments de la ligne de cette prise
+            width_line = self.LINE_WIDTH + (2 if index == self.selected else 0)
             for phase, begin, end in lane.get("segments") or []:
                 x1 = max(left, self._x(begin))
                 x2 = min(right, self._x(end))
                 if x2 - x1 < 1.0:
                     continue
                 pen = QPen(QColor(PHASE_COLORS.get(phase, "#cccccc")),
-                           self.LINE_WIDTH)
+                           width_line)
                 pen.setCapStyle(Qt.RoundCap)
                 painter.setPen(pen)
                 painter.drawLine(QPointF(x1, y), QPointF(x2, y))
@@ -2583,7 +2717,8 @@ class DayTimeline(QWidget):
                     painter.setBrush(QBrush(QColor("#333333")))
                     painter.drawEllipse(QPointF(x, y), 4.0, 4.0)
                     painter.setBrush(Qt.NoBrush)
-            # demi-vie et ses multiples : points creux
+            # demi-vie : un seul point creux (t½), marque la fin de la
+            # ligne d'elimination
             for k, moment in lane.get("halflives") or []:
                 x = self._x(moment)
                 if not (left - 2 <= x <= right + 2):
@@ -2598,6 +2733,20 @@ class DayTimeline(QWidget):
                     painter.drawText(QRectF(x - 22, y - 21, 44, 13),
                                      Qt.AlignCenter, "t½")
         painter.end()
+
+
+class DayList(QListWidget):
+    """Liste des prises du jour ; Suppr supprime la prise selectionnee."""
+
+    removeRequested = Signal()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - API Qt
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) \
+                and not event.modifiers():
+            if self.currentItem() is not None:
+                self.removeRequested.emit()
+                return
+        super().keyPressEvent(event)
 
 
 class CalendarEntryDialog(QDialog):
@@ -2719,10 +2868,14 @@ class CalendarEntryDialog(QDialog):
 class CalendarPane(QWidget):
     """Calendrier du journal des prises : vues annee, mois et jour.
 
-    Une prise = molécule + date/heure + dose (texte libre). Chaque prise
-    est représentée avec la période d'effet estimée d'apres les durees
-    documentees de la molécule (`studio_backend.molecule_timeline`), ou une
-    duree saisie a la main. Aucun conseil, aucune posologie proposee.
+    Une prise = molécule + date/heure + dose (texte libre). Chaque molécule
+    est **représentée par une ligne** aux trois échelles : frise 0 h - 24 h
+    (vue Jour), cases des jours (vue Mois), mini-journées (vue Année). La
+    ligne porte les phases d'effet estimées (durées documentées de
+    `studio_backend.molecule_timeline`) et se prolonge jusqu'à
+    `ELIM_HALF_LIVES` demi-vies quand la demi-vie est documentée ; cliquer
+    une ligne sélectionne la prise correspondante. Aucune posologie n'est
+    proposée.
     """
 
     addRequested = Signal()
@@ -2743,7 +2896,7 @@ class CalendarPane(QWidget):
         self.year = today.year()
         self.month = today.month()
         self.day = today
-        self._computed: list[tuple[dict, datetime, list]] = []
+        self._computed: list[tuple[dict, datetime, list, dict]] = []
         self._day_colors: dict = {}
         self._day_ranks: dict = {}
         self._day_counts: dict = {}
@@ -2836,14 +2989,24 @@ class CalendarPane(QWidget):
                 for phase, begin, end in
                 sb.influence_segments(timeline, entry.get("duree_min"))
             ]
-            computed.append((entry, start, segments))
+            # la ligne va jusqu'au-dela des phases documentees : elle se
+            # prolonge jusqu'a ELIM_HALF_LIVES demi-vies (elimination estimee)
+            half = (timeline or {}).get("halflife")
+            if half and float(half[0]) > 0:
+                end_effect = segments[-1][2] if segments else start
+                end_elim = start + timedelta(
+                    minutes=float(half[0]) * ELIM_HALF_LIVES
+                )
+                if end_elim > end_effect:
+                    segments.append(("élimination", end_effect, end_elim))
+            computed.append((entry, start, segments, timeline))
         self._computed = computed
 
     def _recompute_days(self) -> None:
         self._day_colors = {}
         self._day_ranks = {}
         self._day_counts = {}
-        for entry, start, segments in self._computed:
+        for _entry, start, segments, _timeline in self._computed:
             day = start.date()
             self._day_counts[day] = self._day_counts.get(day, 0) + 1
             for phase, begin, finish in segments:
@@ -2868,13 +3031,12 @@ class CalendarPane(QWidget):
         begin_day = datetime(day.year(), day.month(), day.day())
         end_day = begin_day + timedelta(days=1)
         lanes = []
-        for entry, start, segments in self._computed:
+        for entry, start, segments, timeline in self._computed:
             overlaps = any(begin < end_day and finish > begin_day
                            for _, begin, finish in segments)
             starts_today = begin_day <= start < end_day
             if not overlaps and not starts_today:
                 continue
-            timeline = self.timelines.get(self.molecule_key(entry["molecule"]))
             sub = _fmt_heure(start) if start >= begin_day else "suite"
             if entry["dose"]:
                 sub += f" · {entry['dose']}"
@@ -2885,15 +3047,66 @@ class CalendarPane(QWidget):
                 "sub": sub,
                 "start": start,
                 "segments": segments,
-                "halflives": sb.halflife_points(start, timeline),
+                "halflives": sb.halflife_points(start, timeline, limit=1),
+                "entry": entry,
             })
         lanes.sort(key=lambda lane: lane["start"])
         return lanes
 
     def _entries_of_day(self, day: QDate) -> list[dict]:
         key = day.toPython()
-        return [entry for entry, start, _ in self._computed
+        return [entry for entry, start, _segments, _timeline in self._computed
                 if start.date() == key]
+
+    def _lane_map(self, begin: datetime, end: datetime) -> dict[str, int]:
+        """Index de ligne de chaque molecule sur une periode (mois ou annee).
+
+        Les molecules sont ordonnees par premier jour d'effet dans la periode :
+        une meme molecule garde la meme ligne d'un jour a l'autre, ce qui
+        dessine une ligne continue a travers la grille.
+        """
+        seen: dict[str, datetime] = {}
+        for _entry, _start, segments, _timeline in self._computed:
+            for _phase, begin_seg, end_seg in segments:
+                if begin_seg >= end or end_seg <= begin:
+                    continue
+                key = self.molecule_key(_entry["molecule"])
+                moment = max(begin_seg, begin)
+                if key not in seen or moment < seen[key]:
+                    seen[key] = moment
+        order = sorted(seen, key=lambda key: (seen[key], key))
+        return {key: index for index, key in enumerate(order)}
+
+    def _cell_lanes(self, day: QDate, lane_map: dict[str, int],
+                    max_lanes: int) -> list[list[tuple[float, float, str]]]:
+        """Segments d'une journee, projetes en fractions 0..1 de la cellule.
+
+        Renvoie `max_lanes` lignes vides ou remplies : l'indice est celui de
+        `lane_map`, ce qui conserve l'alignement entre les cellules voisines.
+        """
+        lanes: list[list[tuple[float, float, str]]] = [
+            [] for _ in range(max_lanes)
+        ]
+        begin_day = datetime(day.year(), day.month(), day.day())
+        end_day = begin_day + timedelta(days=1)
+        span = (end_day - begin_day).total_seconds()
+        for entry, _start, segments, _timeline in self._computed:
+            index = lane_map.get(self.molecule_key(entry["molecule"]))
+            if index is None or index >= max_lanes:
+                continue
+            for phase, begin_seg, end_seg in segments:
+                if begin_seg >= end_day or end_seg <= begin_day:
+                    continue
+                first = max(begin_seg, begin_day)
+                last = min(end_seg, end_day)
+                x1 = (first - begin_day).total_seconds() / span
+                x2 = (last - begin_day).total_seconds() / span
+                if x2 - x1 <= 0:
+                    continue
+                lanes[index].append(
+                    (x1, x2, PHASE_COLORS.get(phase, "#cccccc"))
+                )
+        return lanes
 
     def _entry_short(self, entry: dict) -> str:
         start = self._parse_start(entry)
@@ -2992,14 +3205,16 @@ class CalendarPane(QWidget):
         layout = QHBoxLayout(box)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        for phase in ("latence", "montée", "plateau", "descente"):
+        for phase in ("latence", "montée", "plateau", "descente", "élimination"):
             label = QLabel(f"■ {phase}", box)
             label.setStyleSheet(f"color:{PHASE_COLORS[phase]}; font-size:11px;")
             layout.addWidget(label)
         point = QLabel("● prise   ◯ demi-vie (t½)", box)
         point.setStyleSheet("color:#444; font-size:11px;")
         layout.addWidget(point)
-        note = QLabel("effet estimé (durées documentées)", box)
+        note = QLabel(
+            "effet estimé (durées documentées) ; élimination : jusqu'à "
+            f"{ELIM_HALF_LIVES} t½ (≈ estimation)", box)
         note.setStyleSheet("color:#888; font-size:11px;")
         layout.addWidget(note)
         layout.addStretch(1)
@@ -3038,21 +3253,34 @@ class CalendarPane(QWidget):
             label.setStyleSheet("color:#999; font-size:9px;")
             grid.addWidget(label, 0, column)
         first = QDate(year, month, 1)
+        # memes lignes de molecules sur tout le mini-mois (continuite)
+        end_date = first.addMonths(1)
+        lane_map = self._lane_map(
+            datetime(year, month, 1),
+            datetime(end_date.year(), end_date.month(), end_date.day()),
+        )
         row, column = 1, first.dayOfWeek() - 1
         for day_number in range(1, first.daysInMonth() + 1):
             day = QDate(year, month, day_number)
-            button = QToolButton(box)
-            button.setText(str(day_number))
-            button.setFixedSize(24, 21)
-            button.setAutoRaise(True)
+            button = MiniDay(box)
+            button.day_number = day_number
+            button.setFixedSize(30, 26)
+            button.lanes = self._cell_lanes(day, lane_map, CELL_LANES_YEAR)
             color = self._day_color(day)
+            style = "border:1px solid #dcdcdc; background-color:#ffffff;"
+            if color:
+                style = (f"border:1px solid #c8c8c8; "
+                         f"background-color:{_tint(color, 0.30)};")
+            button.setStyleSheet(style)
             tooltip = f"{day_number} {MOIS_FR[month - 1]} {year}"
             count = self._day_counts.get(day.toPython(), 0)
             if count:
                 tooltip += f" — {count} prise(s)"
-            if color:
-                button.setStyleSheet(
-                    f"background-color:{color}; border:1px solid #c0c0c0;"
+            for entry in self._entries_of_day(day):
+                tooltip += (
+                    f"\n{_fmt_heure(self._parse_start(entry))} — "
+                    f"{entry['molecule']}"
+                    + (f" — {entry['dose']}" if entry["dose"] else "")
                 )
             button.setToolTip(tooltip)
             button.clicked.connect(lambda _=False, d=day: self._open_day(d))
@@ -3085,28 +3313,42 @@ class CalendarPane(QWidget):
             grid.addWidget(label, 0, column)
         first = QDate(year, month, 1)
         start_cell = first.addDays(-(first.dayOfWeek() - 1))
+        # une ligne par molecule sur tout le mois : le trait reste continu
+        # d'une cellule a l'autre, meme si l'effet passe minuit
+        end_date = start_cell.addDays(6 * 7)
+        lane_map = self._lane_map(
+            datetime(start_cell.year(), start_cell.month(), start_cell.day()),
+            datetime(end_date.year(), end_date.month(), end_date.day()),
+        )
         for week in range(6):
             for column in range(7):
                 day = start_cell.addDays(week * 7 + column)
                 grid.addWidget(
-                    self._month_cell(day, day.month() == month),
+                    self._month_cell(day, day.month() == month, lane_map),
                     week + 1, column,
                 )
         layout.addLayout(grid, 1)
         return box
 
-    def _month_cell(self, day: QDate, in_month: bool) -> ClickableFrame:
+    def _month_cell(self, day: QDate, in_month: bool,
+                    lane_map: dict) -> ClickableFrame:
         cell = ClickableFrame(self)
         cell.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        cell.setMinimumHeight(74)
+        cell.setMinimumHeight(96)
         color = self._day_color(day)
         if color:
-            style = f"border:1px solid #c0c0c0; background-color:{color};"
+            style = (f"border:1px solid #c8c8c8; "
+                     f"background-color:{_tint(color, 0.30)};")
         elif in_month:
             style = "border:1px solid #e4e4e4; background-color:#ffffff;"
         else:
             style = "border:1px solid #f0f0f0; background-color:#fafafa;"
         cell.setStyleSheet(style)
+        # bande de lignes (une par molecule) au bas de la cellule
+        cell.lanes = self._cell_lanes(day, lane_map, CELL_LANES_MONTH)
+        cell.lane_top = 64
+        cell.lane_step = 5
+        cell.lane_width = 4
         layout = QVBoxLayout(cell)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(0)
@@ -3153,12 +3395,13 @@ class CalendarPane(QWidget):
         layout.addWidget(title)
         layout.addWidget(self._legend())
         row = QHBoxLayout()
+        lanes = self._lanes_of_day(day)
         timeline = DayTimeline(box)
-        timeline.set_day_lanes(day, self._lanes_of_day(day))
+        timeline.set_day_lanes(day, lanes)
         row.addWidget(timeline, 0)
         side = QVBoxLayout()
         side.addWidget(QLabel("Prises du jour", box))
-        self.day_list = QListWidget(box)
+        self.day_list = DayList(box)
         self.day_list.itemDoubleClicked.connect(self._edit_item)
         self.day_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.day_list.customContextMenuRequested.connect(self._day_menu)
@@ -3171,18 +3414,69 @@ class CalendarPane(QWidget):
         buttons = QHBoxLayout()
         add = QPushButton("Ajouter une prise…", box)
         add.clicked.connect(self.addRequested)
-        edit = QPushButton("Modifier…", box)
-        edit.clicked.connect(self._edit_selected)
-        remove = QPushButton("Supprimer", box)
-        remove.clicked.connect(self._remove_selected)
+        self._day_edit = QPushButton("Modifier…", box)
+        self._day_edit.clicked.connect(self._edit_selected)
+        self._day_remove = QPushButton("Supprimer", box)
+        self._day_remove.clicked.connect(self._remove_selected)
+        self.day_list.removeRequested.connect(self._remove_selected)
         buttons.addWidget(add)
-        buttons.addWidget(edit)
-        buttons.addWidget(remove)
+        buttons.addWidget(self._day_edit)
+        buttons.addWidget(self._day_remove)
         buttons.addStretch(1)
         side.addLayout(buttons)
         row.addLayout(side, 1)
         layout.addLayout(row, 1)
+        # selection croisee : clique sur une ligne <-> entree de la liste
+        self._day_timeline = timeline
+        self._day_lanes = lanes
+        timeline.laneClicked.connect(self._select_lane)
+        self.day_list.currentItemChanged.connect(self._selection_changed)
+        self._selection_changed(self.day_list.currentItem(), None)
         return box
+
+    def _select_lane(self, index: int) -> None:
+        """Clic sur une ligne : selectionne la prise correspondante."""
+        timeline = getattr(self, "_day_timeline", None)
+        if timeline is None or not 0 <= index < len(self._day_lanes or []):
+            return
+        timeline.selected = index
+        entry = (self._day_lanes or [])[index].get("entry")
+        for row in range(self.day_list.count()):
+            item = self.day_list.item(row)
+            data = item.data(Qt.UserRole)
+            if data is entry or data == entry:
+                if item is not self.day_list.currentItem():
+                    self.day_list.setCurrentItem(item)
+                break
+        timeline.update()
+
+    def _selection_changed(self, item, _previous) -> None:
+        """Selection dans la liste : surligne la ligne + etat des boutons."""
+        timeline = getattr(self, "_day_timeline", None)
+        if timeline is None:
+            return
+        entry = item.data(Qt.UserRole) if item is not None else None
+        index = -1
+        if entry is not None:
+            for position, lane in enumerate(self._day_lanes or []):
+                data = lane.get("entry")
+                if data is entry or data == entry:
+                    index = position
+                    break
+        timeline.selected = index
+        timeline.update()
+        # boutons actifs des qu'une prise est visee ; si le jour n'a qu'une
+        # seule prise, elle est visee meme sans selection explicite
+        enabled = item is not None or self.day_list.count() == 1
+        self._day_edit.setEnabled(enabled)
+        self._day_remove.setEnabled(enabled)
+
+    def _selected_item(self):
+        """Entree courante, ou l'unique prise du jour s'il n'y en a qu'une."""
+        item = self.day_list.currentItem()
+        if item is None and self.day_list.count() == 1:
+            item = self.day_list.item(0)
+        return item
 
     def _entry_label(self, entry: dict) -> str:
         start = self._parse_start(entry)
@@ -3220,7 +3514,14 @@ class CalendarPane(QWidget):
             value = (f"{_fmt_duree(half[0])}" if half[0] == half[1]
                      else f"{_fmt_duree(half[0])}–{_fmt_duree(half[1])}")
             lines.append(f"Demi-vie documentée : {value} "
-                         f"(points creux : t½, 2 t½, 3 t½…)")
+                         f"(point creux : t½)")
+            if start and float(half[0]) * ELIM_HALF_LIVES > (
+                    segments[-1][2] if segments else 0):
+                lines.append(
+                    f"Prolongement : ligne d'élimination jusqu'à "
+                    f"{ELIM_HALF_LIVES} demi-vies (≈ 97 % éliminé) "
+                    "— estimation, pas une fin d'effet."
+                )
         lines.append("Estimation à partir des durées documentées — pas une "
                      "donnée médicale.")
         return "\n".join(lines)
@@ -3244,7 +3545,7 @@ class CalendarPane(QWidget):
             self.editRequested.emit(entry)
 
     def _edit_selected(self) -> None:
-        self._edit_item(self.day_list.currentItem())
+        self._edit_item(self._selected_item())
 
     def _remove_item(self, item) -> None:
         entry = item.data(Qt.UserRole) if item is not None else None
@@ -3252,7 +3553,7 @@ class CalendarPane(QWidget):
             self.removeRequested.emit(entry)
 
     def _remove_selected(self) -> None:
-        self._remove_item(self.day_list.currentItem())
+        self._remove_item(self._selected_item())
 
     # -- glisser-deposer ---------------------------------------------------
     def dragEnterEvent(self, event) -> None:  # noqa: N802 - API Qt

@@ -452,7 +452,12 @@ après chaque prise.
 
 * **Trois niveaux de vue**, comme un agenda : **Année** (12 mini-mois),
   **Mois** (grille des jours) et **Jour** (frise horizontale 0 h–24 h avec
-  **une ligne par prise**). On passe de l'un
+  **une ligne par prise**). Aux trois niveaux, chaque molécule est
+  **représentée par une ligne** : dans les mini-journées de l'année et dans
+  les cases du mois, ces lignes sont tracées sur un axe **0 h → 24 h**
+  (progression de gauche à droite dans la case), une ligne par molécule,
+  toujours au même rang — si bien qu'une prise qui dépasse minuit **continue
+  la même ligne** dans la case du lendemain. On passe de l'un
   à l'autre en cliquant un jour ou le nom d'un mois, ou par la liste
   *Vue :* ; les flèches `◀ ▶` reculent ou avancent d'une année, d'un mois ou
   d'un jour selon le niveau, et *Aujourd'hui* revient à la date du jour.
@@ -460,6 +465,12 @@ après chaque prise.
   molécules du travail et les noms déjà saisis), la date, l'heure, la dose
   (texte libre) et une note facultative. Dans la vue Jour, double-clic ou
   menu contextuel pour **modifier** ou **supprimer** une prise.
+* **Sélectionner une prise** : cliquer sur une **ligne** (vue Jour)
+  sélectionne la prise correspondante dans la liste — et réciproquement,
+  choisir une ligne de la liste surligne la ligne de la frise. Les boutons
+  *Modifier…* et *Supprimer* sont alors actifs, et la touche `Suppr` agit
+  directement dans la liste. Si le jour ne compte **qu'une seule prise**,
+  elle est visée sans clic préalable.
 * **Période sous influence** : chaque prise a sa propre **ligne**
   (lignes parallèles, ordonnées par heure de prise), de sorte que plusieurs
   molécules sont représentées le même jour sans se superposer. La période
@@ -472,16 +483,23 @@ après chaque prise.
   saisir une autre durée, sinon « auto » utilise ces données ; une prise
   dont aucune durée n'est documentée reste représentée par son point seul,
   avec la mention *durée inconnue*.
-* **Repères** : un **point plein** marque l'instant de la prise et un
-  **point creux** (`t½`) la **demi-vie documentée**, puis ses multiples
-  (2 t½, 3 t½…) s'ils tombent dans la journée. La demi-vie est lue dans
+* **Ligne d'élimination** : quand la demi-vie est documentée, la ligne se
+  **prolonge** au-delà des phases (en gris clair) jusqu'à **5 demi-vies**,
+  convention courante d'une élimination quasi complète (≈ 97 %). C'est une
+  **estimation pharmacocinétique**, distincte de la période d'effet : elle
+  figure dans la légende et dans les infobulles.
+* **Repères** : un **point plein** marque l'instant de la prise et la
+  demi-vie documentée un **unique point creux** marqué `t½` (plus de
+  multiples `2 t½`, `3 t½`… : c'est la ligne qui va jusqu'à 5 t½). La
+  demi-vie est lue dans
   `pharmacology.halflife` du `resume.json` : seul le premier nombre suivi
   de son unité est retenu, car les phrases de Wikipedia en citent souvent
   d'autres ensuite (temps jusqu'au pic…). Elle apparaît aussi dans les
   libellés (`t½ 2.9 h`) et les infobulles de la vue Jour.
-* Une prise dont l'effet dépasse minuit **teinte le lendemain** dans les
-  vues Année et Mois ; la vue Jour reprend la suite de la ligne avec le
-  sous-titre *suite*.
+* Une prise dont l'effet dépasse minuit **teinte légèrement le lendemain**
+  dans les vues Année et Mois (le fond n'est qu'un pâle rappel de la phase
+  dominante : ce sont les lignes qui portent l'information) ; la vue Jour
+  reprend la suite de la ligne avec le sous-titre *suite*.
 * Le journal est un fichier JSON versionné
   (`$XDG_DATA_HOME/pharma/calendrier.json`, soit
   `~/.local/share/pharma/calendrier.json`), indépendant du répertoire de
