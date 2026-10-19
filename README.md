@@ -495,7 +495,10 @@ après chaque prise.
   `pharmacology.halflife` du `resume.json` : seul le premier nombre suivi
   de son unité est retenu, car les phrases de Wikipedia en citent souvent
   d'autres ensuite (temps jusqu'au pic…). Elle apparaît aussi dans les
-  libellés (`t½ 2.9 h`) et les infobulles de la vue Jour.
+  libellés (`t½ 2.9 h`) et les infobulles de la vue Jour ; aux échelles
+  **Année** et **Mois**, le même point creux est tracé dans la case du jour
+  où tombe la demi-vie, aligné sur la ligne de la molécule (il apparaît donc
+  dans la case du lendemain quand la prise a lieu le soir).
 * Une prise dont l'effet dépasse minuit **teinte légèrement le lendemain**
   dans les vues Année et Mois (le fond n'est qu'un pâle rappel de la phase
   dominante : ce sont les lignes qui portent l'information) ; la vue Jour
@@ -505,6 +508,15 @@ après chaque prise.
   `~/.local/share/pharma/calendrier.json`), indépendant du répertoire de
   travail, lisible et éditable à la main. Le bouton *Actualiser* relit le
   fichier et les durées documentées.
+* **Enregistrer / Charger / Effacer** : le menu *Fichier* propose
+  « Enregistrer le calendrier… » (`Ctrl+Alt+S`), « Charger un calendrier… »
+  (`Ctrl+Alt+O`) et « Effacer le calendrier… » ; les mêmes actions sont dans
+  la barre d'outils du calendrier (*Enregistrer…*, *Charger…*, *Effacer…*).
+  Le chargement **remplace** le journal — une confirmation est demandée s'il
+  n'est pas vide — à partir d'un fichier au format `pharma-calendrier` (une
+  simple liste d'entrées est aussi acceptée) ; l'effacement vide le journal et
+  son fichier par défaut, après confirmation. Un fichier absent, illisible ou
+  d'un format inconnu produit un message clair sans rien modifier.
 * **Glisser-déposer** : déposer un dossier ou fichier de molécule de
   l'explorateur sur le calendrier ouvre le dialogue de saisie pré-rempli.
 
@@ -544,7 +556,8 @@ des fichiers JSON, en plus de leur mémorisation automatique (`QSettings`) :
   `Ctrl+W` fermer l'onglet · `Ctrl+1` page Recherche ·
   `Ctrl+2` page Comparaison · `Ctrl+3` page Interactions ·
   `Ctrl+4` page Calendrier ·
-  `Ctrl+Shift+S` enregistrer les tableaux · `Ctrl+Shift+O` charger les tableaux.
+  `Ctrl+Shift+S` enregistrer les tableaux · `Ctrl+Shift+O` charger les tableaux ·
+  `Ctrl+Alt+S` enregistrer le calendrier · `Ctrl+Alt+O` charger le calendrier.
 * Le volet droit affiche `resume.html` **déjà généré** : instantané, sans
   accès réseau. Le bouton *Régénérer le résumé* relance le parser sur le
   dossier de la molécule affichée (même chose que le menu contextuel de
@@ -556,6 +569,11 @@ des fichiers JSON, en plus de leur mémorisation automatique (`QSettings`) :
   threads de fond (barre de progression en bas) : l'interface ne se fige pas.
 * Si le PDF Wikipédia échoue, le résumé est tout de même écrit dans le dossier.
 * Fenêtres, colonnes et répertoire de travail sont mémorisés (`QSettings`).
+  À l'ouverture, le **dernier répertoire de travail** est rouvert et les
+  **deux tableaux** comme le **calendrier** de la session précédente sont
+  rechargés automatiquement, même s'ils n'ont pas été enregistrés à la main :
+  la comparaison est réévaluée sur le disque, les interactions recalculées à
+  partir de leurs sources et le journal des prises relu depuis son fichier.
 
 Rappel : application de **recherche documentaire**, ni avis médical, ni conseil
 de dosage.

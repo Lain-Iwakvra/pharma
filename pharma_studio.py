@@ -2464,6 +2464,21 @@ def _tint(color: str, ratio: float = 0.22) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+def _draw_markers(painter, points, width: float, lane_top: float,
+                  lane_step: float, radius: float) -> None:
+    """Points creux (demi-vie) des cellules de mois / mini-journées.
+
+    `points` : liste de `(fraction_de_largeur, indice_de_ligne)`.
+    """
+    for x_frac, index in points or []:
+        y = lane_top + index * lane_step + lane_step / 2.0
+        x = max(0.0, min(float(x_frac), 1.0)) * width
+        painter.setPen(QPen(QColor("#444444"), 1.1))
+        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.drawEllipse(QPointF(x, y), radius, radius)
+    painter.setBrush(Qt.NoBrush)
+
+
 def _fmt_heure(moment: datetime) -> str:
     return moment.strftime("%H:%M")
 
@@ -2507,9 +2522,11 @@ class ClickableFrame(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.lanes: list[list[tuple[float, float, str]]] = []
+        self.points: list[tuple[float, int]] = []
         self.lane_top = 0
         self.lane_step = 5
         self.lane_width = 4
+        self.point_radius = 2.6
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - API Qt
         if event.button() == Qt.LeftButton:
@@ -2518,7 +2535,7 @@ class ClickableFrame(QFrame):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
         super().paintEvent(event)
-        if not self.lanes:
+        if not self.lanes and not self.points:
             return
         painter = QPainter(self)
         width = float(self.width())
@@ -2535,6 +2552,8 @@ class ClickableFrame(QFrame):
                 pen.setCapStyle(Qt.FlatCap)
                 painter.setPen(pen)
                 painter.drawLine(QPointF(left, y), QPointF(right, y))
+        _draw_markers(painter, self.points, width, self.lane_top,
+                      self.lane_step, self.point_radius)
         painter.end()
 
 
@@ -2546,9 +2565,11 @@ class MiniDay(QToolButton):
         self.setText("")
         self.setAutoRaise(True)
         self.lanes: list[list[tuple[float, float, str]]] = []
+        self.points: list[tuple[float, int]] = []
         self.lane_top = 12
         self.lane_step = 4
         self.lane_width = 3
+        self.point_radius = 2.0
         self.day_number = 0
 
     def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
@@ -2576,6 +2597,8 @@ class MiniDay(QToolButton):
                 pen.setCapStyle(Qt.FlatCap)
                 painter.setPen(pen)
                 painter.drawLine(QPointF(left, y), QPointF(right, y))
+        _draw_markers(painter, self.points, width, self.lane_top,
+                      self.lane_step, self.point_radius)
         painter.end()
 
 
@@ -2602,9 +2625,11 @@ class DayTimeline(QWidget):
     HOUR_WIDTH = 28
 
     laneClicked = Signal(int)
+    removeRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setFocusPolicy(Qt.ClickFocus)
         self.day = QDate.currentDate()
         # une « voie » par prise : {label, sub, start, segments, halflives,
         # entry}
@@ -2636,6 +2661,13 @@ class DayTimeline(QWidget):
                 self.update()
                 self.laneClicked.emit(index)
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - API Qt
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) \
+                and not event.modifiers() and self.selected >= 0:
+            self.removeRequested.emit()
+            return
+        super().keyPressEvent(event)
 
     def _resize_height(self) -> None:
         rows = max(1, len(self.lanes))
@@ -2874,8 +2906,11 @@ class CalendarPane(QWidget):
     ligne porte les phases d'effet estimées (durées documentées de
     `studio_backend.molecule_timeline`) et se prolonge jusqu'à
     `ELIM_HALF_LIVES` demi-vies quand la demi-vie est documentée ; cliquer
-    une ligne sélectionne la prise correspondante. Aucune posologie n'est
-    proposée.
+    une ligne sélectionne la prise correspondante. Le point creux de la
+    demi-vie est tracé aux trois échelles (frise du jour ; case du jour
+    où tombe le t½ dans les vues Mois et Année). Le journal peut être
+    enregistré dans un fichier, rechargé ou effacé (JSON versionné).
+    Aucune posologie n'est proposée.
     """
 
     addRequested = Signal()
@@ -2883,6 +2918,9 @@ class CalendarPane(QWidget):
     removeRequested = Signal(object)
     refreshRequested = Signal()
     pathDropped = Signal(object)
+    saveRequested = Signal()
+    loadRequested = Signal()
+    clearRequested = Signal()
 
     ZOOMS = ("Année", "Mois", "Jour")
 
@@ -2927,6 +2965,23 @@ class CalendarPane(QWidget):
         refresh.setToolTip("Relit le journal et les durées documentées.")
         refresh.triggered.connect(self.refreshRequested)
         bar.addAction(refresh)
+        bar.addSeparator()
+        load_action = QAction("Charger…", self)
+        load_action.setToolTip(
+            "Charger un journal des prises depuis un fichier JSON"
+        )
+        load_action.triggered.connect(lambda: self.loadRequested.emit())
+        bar.addAction(load_action)
+        save_action = QAction("Enregistrer…", self)
+        save_action.setToolTip(
+            "Enregistrer une copie du journal dans un fichier JSON"
+        )
+        save_action.triggered.connect(lambda: self.saveRequested.emit())
+        bar.addAction(save_action)
+        clear_action = QAction("Effacer…", self)
+        clear_action.setToolTip("Vider le journal des prises")
+        clear_action.triggered.connect(lambda: self.clearRequested.emit())
+        bar.addAction(clear_action)
         bar.addSeparator()
         bar.addWidget(QLabel("Vue :", self))
         self.zoom = QComboBox(self)
@@ -3108,6 +3163,27 @@ class CalendarPane(QWidget):
                 )
         return lanes
 
+    def _cell_points(self, day: QDate, lane_map: dict[str, int],
+                     max_lanes: int) -> list[tuple[float, int]]:
+        """Point de demi-vie (t½) de la journee, en fractions 0..1.
+
+        Renvoie [(fraction de largeur, indice de ligne)] : l'indice est celui
+        de `lane_map`, ce qui garde le point aligne d'une cellule a l'autre.
+        """
+        points: list[tuple[float, int]] = []
+        begin_day = datetime(day.year(), day.month(), day.day())
+        end_day = begin_day + timedelta(days=1)
+        span = (end_day - begin_day).total_seconds()
+        for entry, start, _segments, timeline in self._computed:
+            index = lane_map.get(self.molecule_key(entry["molecule"]))
+            if index is None or index >= max_lanes:
+                continue
+            for _k, moment in sb.halflife_points(start, timeline, limit=1):
+                if begin_day <= moment < end_day:
+                    x = (moment - begin_day).total_seconds() / span
+                    points.append((x, index))
+        return points
+
     def _entry_short(self, entry: dict) -> str:
         start = self._parse_start(entry)
         text = f"{_fmt_heure(start)} {entry['molecule']}" if start else entry["molecule"]
@@ -3266,6 +3342,7 @@ class CalendarPane(QWidget):
             button.day_number = day_number
             button.setFixedSize(30, 26)
             button.lanes = self._cell_lanes(day, lane_map, CELL_LANES_YEAR)
+            button.points = self._cell_points(day, lane_map, CELL_LANES_YEAR)
             color = self._day_color(day)
             style = "border:1px solid #dcdcdc; background-color:#ffffff;"
             if color:
@@ -3346,6 +3423,7 @@ class CalendarPane(QWidget):
         cell.setStyleSheet(style)
         # bande de lignes (une par molecule) au bas de la cellule
         cell.lanes = self._cell_lanes(day, lane_map, CELL_LANES_MONTH)
+        cell.points = self._cell_points(day, lane_map, CELL_LANES_MONTH)
         cell.lane_top = 64
         cell.lane_step = 5
         cell.lane_width = 4
@@ -3430,6 +3508,7 @@ class CalendarPane(QWidget):
         self._day_timeline = timeline
         self._day_lanes = lanes
         timeline.laneClicked.connect(self._select_lane)
+        timeline.removeRequested.connect(self._remove_selected)
         self.day_list.currentItemChanged.connect(self._selection_changed)
         self._selection_changed(self.day_list.currentItem(), None)
         return box
@@ -3448,6 +3527,8 @@ class CalendarPane(QWidget):
                 if item is not self.day_list.currentItem():
                     self.day_list.setCurrentItem(item)
                 break
+        # le focus revient a la liste : la touche Suppr agit aussitot
+        self.day_list.setFocus()
         timeline.update()
 
     def _selection_changed(self, item, _previous) -> None:
@@ -3693,6 +3774,9 @@ class MainWindow(QMainWindow):
         self.calendar.removeRequested.connect(self._calendar_remove)
         self.calendar.refreshRequested.connect(self._calendar_activate)
         self.calendar.pathDropped.connect(self._calendar_add_from_tree)
+        self.calendar.saveRequested.connect(self._calendar_save_file)
+        self.calendar.loadRequested.connect(self._calendar_load_file)
+        self.calendar.clearRequested.connect(self._calendar_clear)
         self.calendar_splitter = QSplitter(Qt.Horizontal, self)
         self.calendar_splitter.addWidget(self.calendar)
         self.calendar_splitter.setStretchFactor(0, 1)
@@ -3743,6 +3827,25 @@ class MainWindow(QMainWindow):
         )
         load_tables.triggered.connect(self.load_tables)
         file_menu.addAction(load_tables)
+        file_menu.addSeparator()
+        save_calendar = QAction("Enregistrer le calendrier…", self)
+        save_calendar.setShortcut("Ctrl+Alt+S")
+        save_calendar.setToolTip(
+            "Enregistre une copie du journal des prises dans un fichier JSON."
+        )
+        save_calendar.triggered.connect(self._calendar_save_file)
+        file_menu.addAction(save_calendar)
+        load_calendar = QAction("Charger un calendrier…", self)
+        load_calendar.setShortcut("Ctrl+Alt+O")
+        load_calendar.setToolTip(
+            "Remplace le journal des prises par celui d'un fichier JSON."
+        )
+        load_calendar.triggered.connect(self._calendar_load_file)
+        file_menu.addAction(load_calendar)
+        clear_calendar = QAction("Effacer le calendrier…", self)
+        clear_calendar.setToolTip("Vide le journal des prises.")
+        clear_calendar.triggered.connect(self._calendar_clear)
+        file_menu.addAction(clear_calendar)
         file_menu.addSeparator()
         close_tab = QAction("Fermer l'onglet", self)
         close_tab.setShortcut(QKeySequence.Close)
@@ -3855,7 +3958,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("workspace", str(root))
         self._remove_welcome()
         self.summary.clear()
-        self._compare_reload()
+        self._restore_session()
         self.statusBar().showMessage(f"Répertoire de travail : {root}", 5000)
 
     def _show_welcome(self) -> None:
@@ -4532,6 +4635,83 @@ class MainWindow(QMainWindow):
         self.show_page(3)
         self._calendar_add_dialog({"molecule": name})
 
+    def _calendar_save_file(self) -> None:
+        """Enregistre une copie du journal des prises dans un fichier choisi."""
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Enregistrer le calendrier", "calendrier.json",
+            "Fichier JSON (*.json)",
+        )
+        if not path:
+            return
+        try:
+            sb.save_calendar_file(path, self._calendar_items())
+        except OSError as exc:
+            QMessageBox.warning(self, "Enregistrement impossible", str(exc))
+            return
+        self.statusBar().showMessage(f"Calendrier enregistré : {path}", 5000)
+
+    def _calendar_load_file(self) -> None:
+        """Remplace le journal par celui d'un fichier choisi (avec accord)."""
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Charger un calendrier", str(Path.home()),
+            "Fichier JSON (*.json)",
+        )
+        if not path:
+            return
+        try:
+            entries = sb.load_calendar_file(path)
+        except sb.CalendarError as exc:
+            QMessageBox.warning(self, "Chargement impossible", str(exc))
+            return
+        current = self._calendar_items()
+        if current:
+            answer = QMessageBox.question(
+                self, "Charger un calendrier",
+                f"Remplacer le journal actuel ({len(current)} prise(s)) par "
+                f"{len(entries)} prise(s) ?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self._calendar_entries = list(entries)
+        self._calendar_store()
+        self.statusBar().showMessage(
+            f"Calendrier chargé : {len(entries)} prise(s) — {path}", 5000
+        )
+        if entries:
+            try:
+                moment = datetime.fromisoformat(entries[-1]["start"])
+            except ValueError:
+                return
+            self.calendar.show_date(
+                QDate(moment.year, moment.month, moment.day)
+            )
+
+    def _calendar_clear(self) -> None:
+        """Vide le journal des prises (confirmation demandee)."""
+        current = self._calendar_items()
+        if not current:
+            self.statusBar().showMessage("Le calendrier est déjà vide.", 4000)
+            return
+        answer = QMessageBox.question(
+            self, "Effacer le calendrier",
+            f"Effacer les {len(current)} prise(s) du journal ?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._calendar_entries = []
+        self._calendar_store()
+        self.statusBar().showMessage("Calendrier effacé.", 4000)
+
+    def _restore_session(self) -> None:
+        """A l'ouverture : recharge les tableaux et le calendrier de la
+        derniere session, meme sans enregistrement manuel."""
+        self._compare_reload()
+        self.interactions.set_names(self._interactions_names())
+        self._interactions_display()
+        self._calendar_activate()
+
     # -- fermeture -------------------------------------------------------
     def closeEvent(self, event) -> None:  # noqa: N802 - API Qt
         # revenir sur la page Recherche pour que l'explorateur soit de
@@ -4541,6 +4721,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
         self.settings.setValue("splitter", self.splitter.saveState())
+        self.settings.sync()
         super().closeEvent(event)
 
     # -- bascule entre pages ----------------------------------------------

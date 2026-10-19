@@ -879,6 +879,57 @@ def load_calendar(path: Optional[Path] = None) -> list[dict]:
     return out
 
 
+class CalendarError(Exception):
+    """Fichier de calendrier absent, illisible ou d'un format inconnu."""
+
+
+def save_calendar_file(path, entries) -> Path:
+    """Ecrit une copie du journal dans un fichier choisi.
+
+    Meme format versionne que le journal par defaut (`save_calendar`) ; le
+    dossier parent est cree si besoin. Leve OSError si l'ecriture echoue.
+    """
+    return save_calendar(entries, Path(path))
+
+
+def load_calendar_file(path) -> list[dict]:
+    """Lit un journal depuis un fichier choisi.
+
+    Accepte le format `pharma-calendrier` (dictionnaire versionne) comme une
+    simple liste d'entrees. Les entrees sont nettoyees et triees par date.
+    Leve CalendarError si le fichier est absent, illisible ou d'un format
+    inconnu.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise CalendarError(f"Fichier introuvable : {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CalendarError(f"Fichier illisible : {exc}") from exc
+    if isinstance(data, dict):
+        fmt = data.get("format")
+        if fmt not in (None, CALENDAR_FORMAT):
+            raise CalendarError(f"Format inconnu : {fmt!r}.")
+        version = data.get("version")
+        if isinstance(version, int) and version > CALENDAR_VERSION:
+            raise CalendarError(
+                f"Version {version} trop récente "
+                f"(maximum {CALENDAR_VERSION})."
+            )
+        raw = data.get("prises")
+    elif isinstance(data, list):
+        raw = data
+    else:
+        raise CalendarError("Contenu inattendu (journal JSON attendu).")
+    if not isinstance(raw, list):
+        raise CalendarError("Contenu inattendu (liste de prises attendue).")
+    out = [normalise_entry(e) for e in raw if isinstance(e, dict)]
+    out = [e for e in out if e["molecule"] and e["start"]]
+    out.sort(key=lambda e: e["start"])
+    return out
+
+
 # --- resume (parser) ---------------------------------------------------------
 def resume_markdown_path(molecule_dir: Path) -> Path:
     return Path(molecule_dir) / RESUME_MD
