@@ -142,6 +142,7 @@ import studio_backend as sb
 
 ORG_NAME = "pharma-studio"
 APP_NAME = "Pharma Studio"
+APP_VERSION = "1.0"
 DISCLAIMER = (
     "Outil de recherche documentaire. Les données proviennent de "
     "PsychonautWiki et de Wikipédia : elles ne constituent ni un avis "
@@ -5157,7 +5158,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, root: Path | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.resize(1500, 940)
 
         self.pool = QThreadPool.globalInstance()
@@ -5466,7 +5467,10 @@ class MainWindow(QMainWindow):
         help_menu.addAction(about)
 
     def _about(self) -> None:
-        QMessageBox.information(self, f"À propos de {APP_NAME}", DISCLAIMER)
+        QMessageBox.information(
+            self, f"À propos de {APP_NAME} {APP_VERSION}",
+            f"{APP_NAME} {APP_VERSION}\n\n{DISCLAIMER}",
+        )
 
     # -- theme -----------------------------------------------------------
     def _apply_saved_theme(self) -> None:
@@ -5686,7 +5690,7 @@ class MainWindow(QMainWindow):
             self._show_welcome()
             return
         self.root = root
-        self.setWindowTitle(f"{APP_NAME} — {root}")
+        self.setWindowTitle(f"{APP_NAME} {APP_VERSION} — {root}")
         self.workspace.set_root(root)
         self.settings.setValue("workspace", str(root))
         self._remember_workspace(root)
