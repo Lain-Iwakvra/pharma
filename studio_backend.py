@@ -1179,6 +1179,86 @@ def load_calendar(path: Optional[Path] = None) -> list[dict]:
     return out
 
 
+def calendar_statistics(entries, timelines: Optional[dict] = None) -> dict:
+    """Statistiques descriptives du journal des prises (documentaire).
+
+    Regroupe les prises par molecule : nombre, premiere et derniere date,
+    intervalle moyen, dose cumulee (en mg, quand la dose est chiffrable) et
+    duree d'effet cumulee estimee. `timelines` associe une cle de molecule
+    (sans accents ni casse) a sa timeline documentee. Ce n'est pas un avis
+    medical.
+    """
+    timelines = timelines or {}
+    grouped: dict[str, dict] = {}
+    total = 0
+    first = last = None
+    for entry in entries or []:
+        entry = normalise_entry(entry)
+        if not entry["molecule"] or not entry["start"]:
+            continue
+        try:
+            moment = datetime.fromisoformat(entry["start"])
+        except ValueError:
+            continue
+        total += 1
+        if first is None or moment < first:
+            first = moment
+        if last is None or moment > last:
+            last = moment
+        key = rm.fold_accents(entry["molecule"]).casefold().strip()
+        data = grouped.get(key)
+        if data is None:
+            data = {"name": entry["molecule"], "count": 0, "starts": [],
+                    "dose_mg": 0.0, "dose_count": 0, "effect_min": 0.0,
+                    "effect_count": 0, "notes": 0}
+            grouped[key] = data
+        data["count"] += 1
+        data["starts"].append(moment)
+        dose = parse_dose_mg(entry["dose"])
+        if dose is not None:
+            data["dose_mg"] += dose
+            data["dose_count"] += 1
+        if entry.get("note"):
+            data["notes"] += 1
+        segments = influence_segments(timelines.get(key),
+                                      entry.get("duree_min"))
+        effect = max((end for _phase, _begin, end in segments), default=0.0)
+        if effect > 0:
+            data["effect_min"] += effect
+            data["effect_count"] += 1
+
+    molecules = []
+    for data in grouped.values():
+        starts = sorted(data["starts"])
+        intervals = [(later - earlier).total_seconds() / 3600.0
+                     for earlier, later in zip(starts, starts[1:])]
+        molecules.append({
+            "name": data["name"],
+            "count": data["count"],
+            "first": starts[0],
+            "last": starts[-1],
+            "interval_h": (sum(intervals) / len(intervals)) if intervals
+                          else None,
+            "dose_mg": data["dose_mg"] if data["dose_count"] else None,
+            "dose_count": data["dose_count"],
+            "effect_min": (data["effect_min"] if data["effect_count"]
+                           else None),
+            "effect_count": data["effect_count"],
+            "notes": data["notes"],
+        })
+    molecules.sort(key=lambda item: (-item["count"], item["name"].casefold()))
+    span = 0.0
+    if first is not None and last is not None:
+        span = (last - first).total_seconds() / 86400.0
+    return {
+        "total": total,
+        "molecules": molecules,
+        "first": first,
+        "last": last,
+        "span_days": span,
+    }
+
+
 class CalendarError(Exception):
     """Fichier de calendrier absent, illisible ou d'un format inconnu."""
 

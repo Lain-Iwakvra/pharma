@@ -526,6 +526,11 @@ après chaque prise.
   d'un format inconnu produit un message clair sans rien modifier.
 * **Glisser-déposer** : déposer un dossier ou fichier de molécule de
   l'explorateur sur le calendrier ouvre le dialogue de saisie pré-rempli.
+* **Statistiques…** (barre d'outils ou menu *Données*) ouvre un tableau
+  **par molécule** : nombre de prises, première et dernière date, intervalle
+  moyen, **dose cumulée** (doses chiffrables converties en mg) et **durée
+  d'effet cumulée** estimée. Statistiques descriptives de vos propres
+  saisies — ni avis médical, ni posologie.
 
 > La période affichée est une **estimation documentaire** (durées issues de
 > PsychonautWiki / Wikipedia) : ce n'est ni une donnée médicale, ni une

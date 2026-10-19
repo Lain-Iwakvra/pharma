@@ -3241,6 +3241,92 @@ class CalendarEntryDialog(QDialog):
         return result
 
 
+class CalendarStatsDialog(QDialog):
+    """Statistiques descriptives du journal des prises (documentaire).
+
+    Tableau par molécule : nombre de prises, première et dernière date,
+    intervalle moyen, dose cumulée (doses chiffrables converties en mg) et
+    durée d'effet cumulée estimée. Ni avis médical, ni posologie.
+    """
+
+    def __init__(self, parent, stats):
+        super().__init__(parent)
+        self.setWindowTitle("Statistiques du journal")
+        self.resize(780, 470)
+        self.stats = stats or {}
+
+        layout = QVBoxLayout(self)
+        total = int(self.stats.get("total") or 0)
+        molecules = list(self.stats.get("molecules") or [])
+        if total:
+            first = self.stats.get("first")
+            last = self.stats.get("last")
+            span = float(self.stats.get("span_days") or 0.0)
+            header = (
+                f"<b>{total} prise(s)</b> — {len(molecules)} molécule(s) — "
+                f"période du {first.strftime('%d/%m/%Y')} au "
+                f"{last.strftime('%d/%m/%Y')} ({span:.0f} jour(s))."
+            )
+        else:
+            header = "Journal vide : ajoutez des prises au calendrier."
+        intro = QLabel(header, self)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        columns = ["Molécule", "Prises", "Première", "Dernière",
+                   "Intervalle moyen", "Dose cumulée", "Effet cumulé"]
+        self.table = QTableWidget(len(molecules), len(columns), self)
+        self.table.setHorizontalHeaderLabels(columns)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        for row, item in enumerate(molecules):
+            interval = item.get("interval_h")
+            dose = item.get("dose_mg")
+            effect = item.get("effect_min")
+            cells = [
+                str(item.get("name", "")),
+                str(item.get("count", 0)),
+                item["first"].strftime("%d/%m/%Y %H:%M"),
+                item["last"].strftime("%d/%m/%Y %H:%M"),
+                _fmt_duree(interval * 60) if interval else "—",
+                (f"{dose:.4g} mg" +
+                 ("*" if item.get("dose_count", 0) < item["count"] else ""))
+                if dose is not None else "—",
+                _fmt_duree_longue(effect) if effect else "—",
+            ]
+            for column, value in enumerate(cells):
+                cell = QTableWidgetItem(value)
+                cell.setToolTip(value)
+                self.table.setItem(row, column, cell)
+        self.table.resizeColumnsToContents()
+        layout.addWidget(self.table, 1)
+
+        note = QLabel(
+            "Statistiques descriptives de vos propres saisies : ni avis "
+            "médical, ni posologie. La dose cumulée additionne les doses "
+            "chiffrables (µg/mg/g converties en mg) — un « * » signale des "
+            "prises sans dose chiffrable. L'effet cumulé additionne les "
+            "durées documentées estimées, quand elles existent.",
+            self,
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: palette(mid);")
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, self)
+        buttons.rejected.connect(self.reject)
+        buttons.clicked.connect(lambda _b: self.accept())
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def ask(parent, stats):
+        """Affiche le dialogue (bloquant) et renvoie le resultat."""
+        dialog = CalendarStatsDialog(parent, stats)
+        return dialog.exec()
+
+
 class CalendarPane(QWidget):
     """Calendrier du journal des prises : vues annee, mois et jour.
 
@@ -3271,6 +3357,7 @@ class CalendarPane(QWidget):
     clearRequested = Signal()
     exportCsvRequested = Signal()
     exportIcalRequested = Signal()
+    statisticsRequested = Signal()
 
     ZOOMS = ("Année", "Mois", "Jour")
 
@@ -3347,6 +3434,12 @@ class CalendarPane(QWidget):
         )
         export_ical.triggered.connect(lambda: self.exportIcalRequested.emit())
         bar.addAction(export_ical)
+        statistics = QAction("Statistiques…", self)
+        statistics.setToolTip(
+            "Statistiques descriptives du journal : nombre de prises, "
+            "fréquence et doses par molécule.")
+        statistics.triggered.connect(lambda: self.statisticsRequested.emit())
+        bar.addAction(statistics)
         bar.addSeparator()
         bar.addWidget(QLabel("Vue :", self))
         self.zoom = QComboBox(self)
@@ -4973,6 +5066,7 @@ class MainWindow(QMainWindow):
         self.calendar.clearRequested.connect(self._calendar_clear)
         self.calendar.exportCsvRequested.connect(self._calendar_export_csv)
         self.calendar.exportIcalRequested.connect(self._calendar_export_ical)
+        self.calendar.statisticsRequested.connect(self._calendar_statistics)
         self.calendar.curveRequested.connect(self._calendar_curve)
         self.calendar.dayCurvesRequested.connect(self._calendar_day_curves)
         self.calendar_splitter = QSplitter(Qt.Horizontal, self)
@@ -5113,6 +5207,13 @@ class MainWindow(QMainWindow):
         )
         edit_syn.triggered.connect(self._edit_synonyms)
         data_menu.addAction(edit_syn)
+        data_menu.addSeparator()
+        stats_action = QAction("Statistiques du calendrier…", self)
+        stats_action.setToolTip(
+            "Nombre de prises, fréquence et doses cumulées par molécule."
+        )
+        stats_action.triggered.connect(self._calendar_statistics)
+        data_menu.addAction(stats_action)
 
         view_menu = self.menuBar().addMenu("&Affichage")
         self.toggle_left = QAction("Explorateur", self, checkable=True, checked=True)
@@ -6332,6 +6433,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Écriture impossible", str(exc))
             return
         self.statusBar().showMessage(f"Exporté : {path}", 6000)
+
+    def _calendar_statistics(self) -> None:
+        """Affiche les statistiques descriptives du journal des prises."""
+        entries = self._calendar_items()
+        stats = sb.calendar_statistics(entries, self._calendar_timelines())
+        CalendarStatsDialog.ask(self, stats)
 
     def _restore_session(self) -> None:
         """A l'ouverture : recharge les tableaux et le calendrier de la
