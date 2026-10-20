@@ -4,10 +4,12 @@
 recherche_molecule.py
 ---------------------
 
-Outil de recherche psychopharmacologique en ligne de commande, inspiré de
-l'approche de pw-cli (https://github.com/pharmacologic/pw-cli).
+Coeur de parsing psychopharmacologique : **module de la bibliothèque de
+l'application**, pas un script autonome. Inspiré de l'approche de pw-cli
+(https://github.com/pharmacologic/pw-cli). Le seul point d'entrée du projet
+est `pharma_studio.py` (application de bureau).
 
-Pour une molecule donnee, le script :
+Pour une molecule donnee, `build_report()` :
   1. Interroge l'API GraphQL de PsychonautWiki (Bifrost,
      https://api.psychonautwiki.org) pour recuperer des donnees structurees :
         classification, noms communs, potentiel addictif, toxicite,
@@ -19,30 +21,30 @@ Pour une molecule donnee, le script :
   3. Recupere la page Wikipedia en langue anglaise (API MediaWiki, librairie
      de Goldsmith si disponible, sinon appel direct) pour completer
      (statut legal, toxicite detaillee, chimie...).
-  4. Fusionne et affiche les informations pharmacologiques les plus
-     importantes : dosage, voie(s) d'administration, temps d'apparition
-     (onset), pic plasmatique (Tmax / peak), demi-vie, biodisponibilite,
-     duree d'action, effets residuels, toxicite, potentiel addictif,
-     statut legal.
+  4. Fusionne les informations pharmacologiques les plus importantes :
+     dosage, voie(s) d'administration, temps d'apparition (onset), pic
+     plasmatique (Tmax / peak), demi-vie, biodisponibilite, duree d'action,
+     effets residuels, toxicite, potentiel addictif, statut legal.
 
 Les donnees PsychonautWiki sont prioritaires (wiki specialise dans les
 produits de recherche), completees par Wikipedia quand necessaire.
 
-Exemples d'utilisation :
-    python recherche_molecule.py LSD
-    python recherche_molecule.py "3-MMC" --save json --save md
-    python recherche_molecule.py MDMA --save md
+Ce module fournit uniquement des fonctions et des modeles : aucun affichage
+console, aucun parsing de ligne de commande. L'interface graphique (dialogue
+de recherche, ambiguïtés, export) appartient à `pharma_studio.py`, qui
+délègue ici le téléchargement et le fusionnement des sources.
 
-L'application de bureau (pharma_studio.py) reutilise ce meme module.
+Exports les plus utilisés par l'application :
+    build_report, save_json, save_markdown, report_rows, build_unified_rows,
+    WikiClient, resolve_title, AmbiguousResults, MoleculeReport,
+    fold_accents, LABELS_FR, TARGET_ORDER, COMPARE_ORDER, USER_AGENT
 """
 
 from __future__ import annotations
 
-import argparse
 import html as html_mod
 import json
 import re
-import sys
 import textwrap
 import unicodedata
 from dataclasses import dataclass, field, asdict, fields
@@ -1634,173 +1636,6 @@ def report_rows(report: MoleculeReport) -> list[dict]:
     )
 
 
-# --- affichage ---------------------------------------------------------------
-def _wrap(text: str, width: int = 100, indent: str = "      ") -> str:
-    return "\n".join(
-        indent + line for line in textwrap.fill(text, width=width).splitlines()
-    )
-
-
-def _print_kv(label: str, value: str, width: int = 100, indent: str = "  ") -> None:
-    """Affiche une paire label/valeur avec retour a la ligne."""
-    print(f"{indent}{label}")
-    print(_wrap(truncate(value, 1200), width=width, indent=indent + "    "))
-
-
-def _print_pharma_field(label: str, data: dict[str, str]) -> None:
-    """Affiche un champ pharmacologique fusionne selon la regle :
-    - donnee presente sur un seul site : une seule ligne
-    - donnee sur les deux sites avec la meme valeur : une seule ligne
-    - donnee sur les deux sites avec des valeurs divergentes : deux lignes
-    """
-    pw = data.get("pw", "") or ""
-    wiki = data.get("wiki", "") or ""
-    source = data.get("source", "")
-
-    print(f"\n  {label}")
-
-    if source == "both" and pw and wiki and pw != wiki:
-        # Valeurs divergentes : une ligne pour chaque source
-        print(_wrap(truncate(pw, 1200), width=100, indent="    "))
-        print(_wrap(truncate(wiki, 1200), width=100, indent="    "))
-    else:
-        # Une seule valeur : PW si disponible, sinon Wikipedia, sinon value
-        value = pw or wiki or data.get("value", "")
-        print(_wrap(truncate(value, 1200), width=100, indent="    "))
-
-
-def _print_section_bar(title: str) -> None:
-    print(f"\n{'─' * 4} {title} {'─' * 4}")
-
-
-def _list_items(items: list[str], indent: str = "    ", bullet: str = "•") -> None:
-    for it in items:
-        print(f"{indent}{bullet} {it}")
-
-
-def display_report(report: MoleculeReport) -> None:
-    print(f"\n{'═' * 64}")
-    print(f"║ Rapport psychopharmacologique : {report.molecule}")
-    print(f"{'═' * 64}")
-
-    # --- sources ---
-    _print_section_bar("SOURCES")
-    sub = report.pw_substance
-    wp_page = report.wikipedia
-
-    if sub.found:
-        print(f"\n  [1] PsychonautWiki (GraphQL Bifrost)")
-        print(f"      Nom      : {sub.name}")
-        print(f"      URL      : {sub.url}")
-        if sub.systematic_name:
-            print(f"      Systématique : {sub.systematic_name}")
-        if sub.common_names:
-            print(f"      Noms communs : {'; '.join(sub.common_names)}")
-        if sub.summary:
-            print(f"      Résumé   : {sub.summary[:400]}{'...' if len(sub.summary) > 400 else ''}")
-    else:
-        print(f"\n  [1] PsychonautWiki (GraphQL Bifrost) : non trouvée")
-        if sub.error:
-            print(f"      Erreur : {sub.error}")
-
-    if wp_page.found:
-        print(f"\n  [2] Wikipedia (anglais)")
-        print(f"      Titre    : {wp_page.title}")
-        print(f"      URL      : {wp_page.url}")
-        if wp_page.summary:
-            print(f"      Résumé   : {wp_page.summary[:400]}{'...' if len(wp_page.summary) > 400 else ''}")
-    else:
-        print(f"\n  [2] Wikipedia (anglais) : non trouvée")
-        if wp_page.error:
-            print(f"      Erreur : {wp_page.error}")
-
-    # --- donnees structurees PsychonautWiki (GraphQL) ---
-    _print_section_bar("PSYCHONAUTWIKI — DONNÉES STRUCTURÉES (GRAPHQL BIFROST)")
-    if sub.found:
-        if sub.chemical_class:
-            _print_kv("Classification chimique", "; ".join(sub.chemical_class))
-        if sub.psychoactive_class:
-            _print_kv("Classification psychoactive", "; ".join(sub.psychoactive_class))
-        if sub.common_names:
-            _print_kv("Noms communs", "; ".join(sub.common_names))
-        if sub.systematic_name:
-            _print_kv(LABELS_FR["systematic_name"], sub.systematic_name)
-        if sub.addiction_potential:
-            _print_kv(LABELS_FR["addiction"], sub.addiction_potential)
-        if sub.toxicity:
-            _print_kv(LABELS_FR["toxicity"], "; ".join(sub.toxicity))
-        if sub.effects:
-            _print_kv(LABELS_FR["effects"], "; ".join(sub.effects))
-        if sub.interactions_dangerous:
-            _print_kv("Interactions dangereuses", "; ".join(sub.interactions_dangerous))
-        if sub.interactions_unsafe:
-            _print_kv("Interactions déconseillées", "; ".join(sub.interactions_unsafe))
-        if sub.interactions_uncertain:
-            _print_kv("Interactions à confirmer", "; ".join(sub.interactions_uncertain))
-        if sub.cross_tolerances:
-            _print_kv(LABELS_FR["cross_tolerance"], "; ".join(sub.cross_tolerances))
-
-        # voies d'administration detaillees
-        if sub.roas:
-            print(f"\n  Voies d'administration (ROA) :")
-            for r in sub.roas:
-                print(f"    ▸ {r.name}")
-                for key, value in (
-                    ("dosage", r.dose),
-                    ("onset", r.onset),
-                    ("comeup", r.comeup),
-                    ("peak", r.peak),
-                    ("duration", r.duration),
-                    ("offset", r.offset),
-                    ("bioavailability", r.bioavailability),
-                ):
-                    if value:
-                        print(f"        {ROA_PART_LABELS[key]:<16}: {value}")
-    else:
-        print("  Aucune donnée structurée PsychonautWiki disponible.")
-
-    # --- donnees Wikipedia par section ---
-    _print_section_bar("WIKIPEDIA (ANGLAIS) — INFOBOX PAR SECTION")
-    infobox = report.wiki_infobox
-    if not infobox.sections and not infobox.fields:
-        print("  Aucune infobox Wikipedia exploitable.")
-    else:
-        # sections selon WIKI_SECTION_ORDER, puis les autres par alphabet
-        for sec in sorted(infobox.sections, key=wiki_section_sort_key):
-            _print_wiki_section(sec, infobox.sections[sec])
-
-        # champs hors section
-        if infobox.fields:
-            print(f"\n  Autres champs de l'infobox :")
-            for label, value in infobox.fields.items():
-                _print_kv(label, value)
-
-    # --- pharmacologie fusionnee (champs cibles) ---
-    _print_section_bar("PHARMACOLOGIE — CHAMPS CIBLES FUSIONNÉS")
-    if not report.pharmacology:
-        print("  Aucune information pharmacologique structurée détectée.")
-        return
-
-    shown = set()
-    for key in TARGET_ORDER:
-        if key in report.pharmacology and key not in HIDDEN_KEYS:
-            _print_pharma_field(LABELS_FR.get(key, key), report.pharmacology[key])
-            shown.add(key)
-    for key, data in report.pharmacology.items():
-        if key in HIDDEN_KEYS or key in shown:
-            continue
-        _print_pharma_field(LABELS_FR.get(key, key), data)
-
-
-def _print_wiki_section(section_name: str, items: list[tuple[str, str]]) -> None:
-    """Affiche une section de l'infobox Wikipedia (label/valeur).
-    Ces donnees ne viennent que de Wikipedia : pas de mention de source.
-    """
-    print(f"\n  ▤ {wiki_section_label(section_name)}")
-    for label, value in items:
-        _print_kv(label, value)
-
-
 # --- sauvegarde --------------------------------------------------------------
 def save_json(report: MoleculeReport, path: str, quiet: bool = False) -> None:
     with open(path, "w", encoding="utf-8") as f:
@@ -1963,107 +1798,3 @@ def save_markdown(report: MoleculeReport, path: str,
         print(f"[ok] Markdown sauvegarde : {path}")
 
 
-# --- pipeline principal ------------------------------------------------------
-def run(molecule: str, save_formats: list[str],
-        choices: Optional[dict[str, str]] = None) -> MoleculeReport:
-    """Deroule la recherche, affiche puis sauvegarde le rapport.
-
-    `choices` porte les choix deja faits par l'utilisateur ({"pw": ...,
-    "wp": ...}) : ce qui a deja ete tranche n'est jamais redemande.
-    """
-    choices = choices or {}
-
-    report = build_report(molecule, choices, progress=print)
-    # (Wikipedia est toujours interroge en anglais, comme demande)
-    display_report(report)
-
-    for fmt in save_formats:
-        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", molecule)
-        if fmt == "json":
-            save_json(report, f"recherche_{safe}.json")
-        elif fmt == "md":
-            save_markdown(report, f"recherche_{safe}.md")
-        else:
-            print(f"[!] Format non supporte ignore : {fmt}")
-
-    return report
-
-
-def _prompt_choice(exc: AmbiguousResults) -> Optional[str]:
-    """Menu numéroté dans le terminal. Utilise uniquement par la CLI."""
-    print(f"\nPlusieurs résultats sur {exc.source_name} pour '{exc.query}' :")
-    for i, title in enumerate(exc.candidates, 1):
-        print(f"  {i}. {title}")
-    try:
-        saisie = input(
-            f"Choisissez un numéro [1-{len(exc.candidates)}] (entrée = 1) : "
-        ).strip()
-    except (EOFError, KeyboardInterrupt):
-        print("\nAnnule.")
-        return None
-    if not saisie:
-        return exc.candidates[0]
-    try:
-        idx = int(saisie)
-    except ValueError:
-        idx = 0
-    if 1 <= idx <= len(exc.candidates):
-        return exc.candidates[idx - 1]
-    print("Choix invalide, premier résultat utilisé.")
-    return exc.candidates[0]
-
-
-def _run_cli(molecule: str, save_formats: list[str]) -> int:
-    """CLI : pose les questions ambigues dans le terminal jusqu'au bout."""
-    choices: dict[str, str] = {}
-    # PsychonautWiki puis Wikipedia : deux questions au maximum.
-    for _ in range(4):
-        try:
-            run(molecule, save_formats, choices)
-            return 0
-        except AmbiguousResults as exc:
-            if not sys.stdin.isatty():
-                # pas d'interaction possible : on n'improvise pas de choix
-                print(
-                    f"[!] Plusieurs résultats sur {exc.source_name} pour "
-                    f"'{exc.query}' :\n    {' ; '.join(exc.candidates)}\n"
-                        "    Relancez la commande depuis un terminal interactif "
-                    "pour choisir."
-                )
-                return 1
-            pick = _prompt_choice(exc)
-            if pick is None:
-                return 130
-            choices[exc.source] = pick
-    print("[!] Recherche encore ambiguë après plusieurs choix.")
-    return 1
-
-
-def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Recherche psychopharmacologique : récupère et fusionne les données "
-            "PsychonautWiki (GraphQL Bifrost) et Wikipedia (anglais) d'une molecule."
-        )
-    )
-    parser.add_argument("molecule", help="Nom de la molecule a rechercher")
-    parser.add_argument(
-        "--save",
-        action="append",
-        choices=["json", "md"],
-        help="Sauvegarder le rapport (json et/ou md, répétable)",
-    )
-    args = parser.parse_args(argv)
-
-    try:
-        return _run_cli(args.molecule, args.save or [])
-    except KeyboardInterrupt:
-        print("\nInterrompu par l'utilisateur.")
-        return 130
-    except Exception as exc:
-        print(f"Erreur inattendue : {exc}")
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

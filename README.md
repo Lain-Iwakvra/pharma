@@ -19,7 +19,7 @@ calcul d'interactions, un calendrier de prises et un tracé pharmacocinétique.
 
 1. [Aperçu](#aperçu)
 2. [Installation](#installation)
-3. [Ligne de commande](#ligne-de-commande)
+3. [Cœur de parsing](#cœur-de-parsing)
 4. [Application de bureau](#application-de-bureau)
    - [Le répertoire de travail](#le-répertoire-de-travail)
    - [Explorateur et lecteur](#explorateur-et-lecteur)
@@ -63,12 +63,13 @@ L'approche s'inspire de
 [pw-cli](https://github.com/pharmacologic/pw-cli), qui interroge le même API
 GraphQL Bifrost.
 
-Deux façons de s'en servir, **sur le même cœur de parsing** :
-
-| Interface | Fichier | Usage |
-|-----------|---------|-------|
-| Ligne de commande | `recherche_molecule.py` | recherche ponctuelle, export JSON / Markdown |
-| Application de bureau | `pharma_studio.py` | atelier à volets : fichiers, documents, résumé, comparaison, interactions, calendrier, pharmacocinétique |
+**Architecture.** `recherche_molecule.py` n'est pas un script autonome : c'est
+le **module de cœur** (clients, parseurs, fusion des sources, exports),
+importé par l'application — `studio_backend.py` et `pharma_studio.py` font
+tous deux `import recherche_molecule as rm`. Le **seul point d'entrée** du
+projet est l'application de bureau `pharma_studio.py`, atelier à volets :
+fichiers, documents, résumé, comparaison, interactions, calendrier,
+pharmacocinétique.
 
 ---
 
@@ -89,74 +90,34 @@ Dépendances : `requests`, `wikipedia`, `beautifulsoup4`, `PySide6 >= 6.6`
 
 ---
 
-## Ligne de commande
+## Cœur de parsing
 
-```bash
-# Affichage seul
-python3 recherche_molecule.py LSD
+`recherche_molecule.py` n'est **pas un script autonome** : c'est le module de
+cœur du projet — clients GraphQL / MediaWiki, parseurs, fusion des sources,
+exports. Il ne contient ni affichage de rapport, ni ligne de commande, ni
+`input()` ; tout y est fonction ou modèle, importé par l'application :
 
-# Avec sauvegarde du rapport
-python3 recherche_molecule.py "3-MMC" --save json --save md
-python3 recherche_molecule.py MDMA --save md
+```python
+import recherche_molecule as rm
+
+report = rm.build_report("LSD", choices={}, progress=print)  # rapport complet
+rm.save_json(report, "recherche_LSD.json", quiet=True)      # export JSON
+rm.save_markdown(report, "recherche_LSD.md", quiet=True)    # export Markdown
+rows = rm.report_rows(report)                               # lignes du tableau
 ```
 
-| Option | Effet |
-|--------|-------|
-| `molecule` | nom à rechercher (positionnel, requis) |
-| `--save json` / `--save md` | enregistre `recherche_<molécule>.json` et/ou `.md` (répétable) |
+| Point d'entrée | Rôle |
+|----------------|------|
+| `build_report(molécule, choices, progress=…)` | téléchargement + fusion des trois sources en un `MoleculeReport` |
+| `WikiClient` / `resolve_title()` | lecture d'une source ; lève `AmbiguousResults` quand plusieurs pages correspondent |
+| `report_rows()` / `build_unified_rows()` | lignes du tableau unifié (écran, comparaison, exports) |
+| `save_json()` / `save_markdown()` | exports du rapport |
+| `fold_accents()`, `LABELS_FR`, `TARGET_ORDER`, `COMPARE_ORDER`, `USER_AGENT` | normalisation et libellés partagés par toute l'application |
 
 Quand plusieurs substances correspondent au nom saisi et qu'aucun titre exact
-n'existe, **le choix n'est jamais silencieux** :
-
-* **terminal interactif** → menu numéroté ;
-* **terminal non interactif** (flux redirigé, cron…) → la liste des candidats
-  est affichée et le script s'arrête avec le code de sortie `1` ;
-* **application de bureau** → une fenêtre liste les candidats et la tâche
-  reprend avec le titre retenu (jamais de question dans un terminal).
-
-### Exemple de sortie
-
-```
-> Recherche de 'LSD' sur PsychonautWiki (GraphQL Bifrost) ...
-> Recherche de 'LSD' sur Wikipedia (anglais) ...
-
-############################################################
-# Rapport psychopharmacologique : LSD
-############################################################
-
-──── PHARMACOLOGIE — CHAMPS CIBLES FUSIONNES ────
-
-  Nom
-    LSD
-
-  Noms communs
-    LSD; LSD-25; Lucy; L; Acid; Cid; Tabs; Blotter
-
-  Voie(s) d'administration
-    Sublinguale
-
-  Dosage
-    Sublinguale: seuil: 15.0 ; leger: 15.0-75.0 ; commun: 75.0-150.0 ;
-    fort: 150.0-300.0 ; lourd: 300.0 ; (µg)
-
-  Temps d'apparition (onset)
-    15.0-30.0 minutes
-
-  Pic plasmatique (Tmax / peak)
-    3.0-5.0 hours
-
-  Biodisponibilite
-    Sublinguale: 71.0%
-
-  Demi-vie (half-life)
-    175 minutes
-
-  Potentiel addictif / dependance
-    non-addictive with a low abuse potential
-
-  Toxicite
-    extremely low toxicity relative to dose
-```
+n'existe, **le choix n'est jamais silencieux** : l'application ouvre une
+fenêtre listant les candidats (`AmbiguousResults`) et la tâche reprend avec le
+titre retenu — jamais de question dans un terminal.
 
 ---
 
@@ -201,7 +162,7 @@ appliquent aussi.
     wikipedia_LSD.pdf           <- PDF de la page Wikipédia anglaise
     psychonautwiki_LSD.pdf      <- PDF de la page PsychonautWiki
     resume.html                 <- version affichée dans le volet droit
-    resume.json                 <- données brutes (mêmes que la CLI)
+    resume.json                 <- données brutes (cœur de parsing)
     etudes/
       Hofmann 1943.pdf          <- hérite de la molécule « LSD »
   .corbeille/                   <- corbeille interne (suppressions réversibles)
@@ -631,7 +592,7 @@ l'utilisateur ; aucune donnée du répertoire de travail n'est modifiée.
 
 | Fichier | Rôle |
 |---------|------|
-| `recherche_molecule.py` | cœur : clients GraphQL / MediaWiki, parseurs, fusion des sources, lignes du tableau unifié, export JSON / Markdown, CLI |
+| `recherche_molecule.py` | **module de cœur** (pas un script) : clients GraphQL / MediaWiki, parseurs, fusion des sources, lignes du tableau unifié, export JSON / Markdown — importé par `studio_backend.py` et `pharma_studio.py` |
 | `studio_backend.py` | logique de l'atelier sans Qt : chemins sûrs, téléchargements, génération des résumés, recherche PubMed / littérature, import et conversion de documents, mise en page d'impression, texte intégral Europe PMC → PDF, tableaux JSON, **modèle pharmacocinétique** et statistiques du journal |
 | `pharma_studio.py` | interface PySide6 : 3 volets, lecteur, dialogues, 5 pages, thème, historique, filtres, exports |
 | `requirements.txt` | dépendances (`requests`, `wikipedia`, `beautifulsoup4`, `PySide6`) |
@@ -641,7 +602,7 @@ l'utilisateur ; aucune donnée du répertoire de travail n'est modifiée.
 
 | Fichier | Contenu |
 |---------|---------|
-| `resume.json` | données brutes d'une molécule (mêmes que la CLI) |
+| `resume.json` | données brutes d'une molécule (produites par le cœur de parsing) |
 | `resume.html` | résumé mis en forme, affiché dans le volet droit |
 | `calendrier.json` | journal des prises (format `pharma-calendrier`) |
 | `.pharma.json` | association explicite d'un dossier à une molécule |
