@@ -57,6 +57,7 @@ from PySide6.QtCore import (
     QObject,
     QPoint,
     QPointF,
+    Property,
     QPropertyAnimation,
     QRectF,
     QRunnable,
@@ -187,7 +188,10 @@ class RowDropIndicator(QWidget):
     """
 
     def __init__(self, table: QTableWidget, parent=None):
-        super().__init__(parent or table)
+        # enfant du VIEWPORT : le repere doit partager le repere de
+        # coordonnees des lignes (`visualRect`), sinon il est decale des
+        # en-tetes et deborde au-dessus du tableau.
+        super().__init__(parent or table.viewport())
         self._table = table
         self._y: int | None = None
         self._label = ""
@@ -202,6 +206,7 @@ class RowDropIndicator(QWidget):
         self._label = str(label or "")
         self._y = int(y)
         self.setGeometry(self._table.viewport().rect())
+        self.raise_()
         self._timer.stop()
         self.setVisible(True)
         # repaint immédiat : le repère doit coller au pointeur
@@ -234,21 +239,28 @@ class RowDropIndicator(QWidget):
         accent = theme_color("#1f6feb", "#7db8ff")
         width = self.width()
 
-        ghost = QFont(self.font())
-        ghost.setBold(True)
-        painter.setFont(ghost)
-        metrics = painter.fontMetrics()
-        left = 6
-        rise = metrics.height() + 6
         if self._label:
+            ghost = QFont(self.font())
+            ghost.setBold(True)
+            painter.setFont(ghost)
+            metrics = painter.fontMetrics()
+            left = 6
+            height = metrics.height() + 4
+            # la bande se place au-dessus du trait, mais BASCULE en dessous
+            # quand elle sortirait du viewport (premiere ligne survolée) :
+            # rien ne doit etre peint hors du tableau.
+            top = y - height
+            if top < 0:
+                top = y + 2
+            top = min(top, max(0, self.height() - height))
             text_width = metrics.horizontalAdvance(self._label) + 20
             painter.setBrush(QBrush(theme_color("#eaf2fd", "#243247")))
             painter.setPen(QPen(accent, 1.0, Qt.DashLine))
             painter.drawRoundedRect(
-                QRectF(left, y - rise, text_width, rise - 2), 5, 5)
+                QRectF(left, top, text_width, height), 5, 5)
             painter.setPen(QPen(accent))
             painter.drawText(
-                QRectF(left + 10, y - rise, text_width - 20, rise - 2),
+                QRectF(left + 10, top, text_width - 20, height),
                 Qt.AlignVCenter | Qt.AlignLeft, self._label)
 
         # trait d'insertion : épaissi par la flèche de dépôt, bout arrondi
@@ -1304,6 +1316,16 @@ class WorkspacePane(QWidget):
             self.tree.setHeaderHidden(False)
             self.tree.setSortingEnabled(False)  # fs model gère le tri
             self.tree.setModel(self.proxy)
+            # le modele de fichiers a quatre colonnes (Nom, Taille, Type,
+            # Date) : seule la premiere est utile, les autres sont masquees.
+            # Indispensable de le refaire ici : la vue classee (une seule
+            # colonne) les avait demontees, et sans cela l'arborescence
+            # revient avec des colonnes vides.
+            self.tree.setColumnHidden(0, False)
+            for column in (1, 2, 3):
+                self.tree.setColumnHidden(column, True)
+            self.tree.header().setStretchLastSection(False)
+            self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
             self.set_root(self.root)
         else:
             self.tree.setSortingEnabled(False)
@@ -1411,6 +1433,10 @@ class WorkspacePane(QWidget):
 
         self.grouped_model = model
         self.tree.setModel(model)
+        # une seule colonne dans cette vue : les colonnes 1-3 du modele de
+        # fichiers ne doivent pas rester visibles (elles resteraient vides).
+        for column in range(1, 4):
+            self.tree.setColumnHidden(column, True)
         self.tree.setHeaderHidden(True)
         if len(names) <= 50:
             self.tree.expandAll()
@@ -2213,6 +2239,9 @@ class CompareTable(QTableWidget):
         self.row_indicator: RowDropIndicator | None = None
         # animation du flash : une seule à la fois (demarrage avant la fin)
         self._flash: QPropertyAnimation | None = None
+        # ligne animée et sa hauteur d'origine (restauration ciblée)
+        self._flash_row = -1
+        self._flash_height = 0.0
 
     # -- repere d'insertion ------------------------------------------------
     def _has_row_mime(self, mime: QMimeData) -> bool:
@@ -2267,21 +2296,20 @@ class CompareTable(QTableWidget):
         où la molécule a atterri. Sans anicroche si la ligne n'est pas
         affichée (filtre) ou si le tableau a été reconstruit entre-temps.
         """
-        visual = -1
-        for r in range(self.rowCount()):
-            item = self.item(r, 0)
-            stored = item.data(Qt.UserRole + 1) if item is not None else None
-            if stored is not None and int(stored) == int(real_index):
-                visual = r
-                break
+        visual = self._visual_row(real_index)
         if visual < 0:
             return
         if self._flash is not None:
             self._flash.stop()
             self._reset_flash_rows()
         start = float(self.rowHeight(visual))
+        self._flash_row = visual
+        self._flash_height = start
         end = start + 12.0
-        animation = QPropertyAnimation(self, b"rowHeight", self)
+        # `rowHeight` n'est PAS une propriete Qt animable (elle est geree
+        # par le modele) : on anime donc la propriete maison `flashHeight`,
+        # dont le setter applique la hauteur a la ligne suivie.
+        animation = QPropertyAnimation(self, b"flashHeight", self)
         animation.setDuration(70)
         animation.setStartValue(start)
         animation.setKeyValueAt(0.5, end)
@@ -2291,10 +2319,40 @@ class CompareTable(QTableWidget):
         self._flash = animation
         animation.start(QPropertyAnimation.DeleteWhenStopped)
 
+    def _get_flash_height(self) -> float:
+        return self._flash_height
+
+    def _set_flash_height(self, value: float) -> None:
+        """Applique la hauteur animee a la ligne suivie (setter de `flashHeight`)."""
+        self._flash_height = float(value)
+        row = self._flash_row
+        if 0 <= row < self.rowCount():
+            self.setRowHeight(row, int(round(float(value))))
+
+    # propriete animable : `rowHeight` ne l'est pas pour QTableWidget
+    flashHeight = Property(float, _get_flash_height, _set_flash_height)
+
     def _reset_flash_rows(self) -> None:
-        """Repose toutes les hauteurs par défaut après le flash."""
+        """Repose la hauteur de la seule ligne animée.
+
+        Surtout pas `resizeRowsToContents()` : il recalculerait la hauteur
+        des AUTRES lignes d'après leur contenu (30 -> 32 px), ce qui les
+        ferait toutes grandir un peu plus à chaque dépôt.
+        """
         self._flash = None
-        self.resizeRowsToContents()
+        row = self._flash_row
+        self._flash_row = -1
+        if 0 <= row < self.rowCount():
+            self.setRowHeight(row, int(self._flash_height))
+
+    def _visual_row(self, real_index: int) -> int:
+        """Ligne affichée portant l'indice `real_index` de la liste (-1 sinon)."""
+        for r in range(self.rowCount()):
+            item = self.item(r, 0)
+            stored = item.data(Qt.UserRole + 1) if item is not None else None
+            if stored is not None and int(stored) == int(real_index):
+                return r
+        return -1
 
     # -- glisser-deposer --------------------------------------------------
     @staticmethod
@@ -2386,8 +2444,8 @@ class CompareTable(QTableWidget):
             self.ROW_MIME, ",".join(str(i) for i in idxs).encode("utf-8")
         )
         # le repère d'insertion affiche le nom des molécules transportées
-        names = [self.item(self.table_index(i), 0).text()
-                 for i in idxs if self.table_index(i) >= 0]
+        names = [self.item(self._visual_row(i), 0).text()
+                 for i in idxs if self._visual_row(i) >= 0]
         mime.setText("; ".join(names))
         drag = QDrag(self)
         drag.setMimeData(mime)
@@ -2396,15 +2454,6 @@ class CompareTable(QTableWidget):
         # repère s'efface de lui-même.
         if self.row_indicator is not None:
             self.row_indicator.finish()
-
-    def table_index(self, real_index: int) -> int:
-        """Ligne affichée portant l'indice `real_index` de la liste (-1 sinon)."""
-        for r in range(self.rowCount()):
-            item = self.item(r, 0)
-            stored = item.data(Qt.UserRole + 1) if item is not None else None
-            if stored is not None and int(stored) == int(real_index):
-                return r
-        return -1
 
     # -- clavier ----------------------------------------------------------
     def keyPressEvent(self, event) -> None:  # noqa: N802 - API Qt
@@ -2573,7 +2622,7 @@ class ComparePane(QWidget):
 
         # repère de dépôt des lignes : dessiné par-dessus le tableau pendant
         # un glisser de ligne, pour montrer l'endroit exact de l'insertion.
-        self.table.row_indicator = RowDropIndicator(self.table, self.table)
+        self.table.row_indicator = RowDropIndicator(self.table)
 
         self.show_rows([])
 
