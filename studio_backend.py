@@ -27,6 +27,7 @@ sortir de la racine du repertoire de travail, meme avec un chemin tordu.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import csv
 import io
 import json
@@ -34,6 +35,7 @@ import math
 import os
 import re
 import shutil
+import threading
 import time
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -1838,6 +1840,52 @@ def _get_xml(url: str, params: Optional[dict] = None):
         raise AcquireError(f"Requete impossible ({url}) : {exc}") from exc
 
 
+# NCBI E-utilities : 3 requetes/sans cle, 10 avec `tool` + `email`, et surtout
+# une seule adresse pour PubMed et PubMed Central. Les deux recherches tournent
+# en parallele : on resserre donc les appels derriere un verrou, on identifie
+# l'outil et on reessaie apres un 429 (trop de requetes) ou une erreur serveur.
+NCBI_MIN_INTERVAL = 0.4          # intervalle minimal entre deux appels NCBI
+NCBI_DELAYS = (0.0, 1.0, 3.0)    # attentes entre les tentatives
+_ncbi_lock = threading.Lock()
+_ncbi_next_call = 0.0
+
+
+def _ncbi_json(url: str, params: Optional[dict] = None) -> dict:
+    """GET JSON E-utilities : etiquette NCBI, cadence imposee, reprise du 429."""
+    global _ncbi_next_call
+    payload = dict(params or {})
+    payload.setdefault("tool", "pharma_studio")
+    if UNPAYWALL_EMAIL:
+        payload.setdefault("email", UNPAYWALL_EMAIL)
+    erreur = ""
+    for delai in NCBI_DELAYS:
+        if delai:
+            time.sleep(delai)
+        with _ncbi_lock:
+            attente = _ncbi_next_call - time.time()
+            if attente > 0:
+                time.sleep(attente)
+            _ncbi_next_call = time.time() + NCBI_MIN_INTERVAL
+        try:
+            resp = requests.get(url, params=payload, timeout=HTTP_TIMEOUT,
+                                headers={"User-Agent": rm.USER_AGENT})
+        except requests.RequestException as exc:
+            erreur = str(exc)
+            continue
+        if resp.status_code in (429, 500, 502, 503, 504):
+            erreur = f"HTTP {resp.status_code}"
+            continue
+        if resp.status_code != 200:
+            raise AcquireError(
+                f"Requete refusee (HTTP {resp.status_code}) : {url}"
+            )
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise AcquireError(f"Reponse illisible ({url}) : {exc}") from exc
+    raise AcquireError(f"Requete impossible ({url}) : {erreur}")
+
+
 def search_open_library(query: str, limit: int = 20) -> list[BookHit]:
     """Recherche de livres via l'API Open Library (metadonnees + pret)."""
     data = _get_json(OL_SEARCH, {
@@ -2029,56 +2077,62 @@ def resolve_book_download(hit: BookHit, progress: Progress = None
     return url, ext, libelle
 
 
-def search_pubmed_central(query: str, limit: int = 20) -> list[BookHit]:
-    """Recherche d'articles en acces libre sur PubMed Central (PMC)."""
-    ids_data = _get_json(f"{PMC_EUTILS}/esearch.fcgi", {
+def search_pubmed_central(query: str, limit: int = 20) -> list[ArticleHit]:
+    """Recherche d'articles en acces libre sur PubMed Central (PMC).
+
+    Les resultats sont des ArticleHit comme sur PubMed : meme pipeline de
+    telechargement (candidats PDF valides puis repli sur le texte integral)
+    et deduplication exacte avec PubMed via le PMCID ou le DOI.
+    """
+    ids_data = _ncbi_json(f"{PMC_EUTILS}/esearch.fcgi", {
+        # sans `tri`, PMC revient par date de publication : les resultats les
+        # plus recents passent avant les plus pertinents (defaut NCBI)
         "db": "pmc", "term": query, "retmax": limit, "retmode": "json",
+        "sort": "relevance",
     })
     ids = ids_data.get("esearchresult", {}).get("idlist", []) or []
     if not ids:
         return []
-    summary = _get_json(f"{PMC_EUTILS}/esummary.fcgi", {
+    summary = _ncbi_json(f"{PMC_EUTILS}/esummary.fcgi", {
         "db": "pmc", "id": ",".join(ids), "retmode": "json",
     })
     result = summary.get("result", {})
-    hits: list[BookHit] = []
+    hits: list[ArticleHit] = []
     for pmc_id in ids:
         doc = result.get(str(pmc_id)) or {}
         if not doc:
             continue
+        pmcid = str(pmc_id)
+        pmcid = pmcid if pmcid.upper().startswith("PMC") else f"PMC{pmcid}"
+        ids_map: dict = {"pmcid": pmcid}
+        # esummary (db=pmc) porte aussi les identifiants du document
+        for entry in (doc.get("articleids") or []):
+            kind = str(entry.get("idtype", "") or "").lower()
+            value = str(entry.get("value", "") or "")
+            if kind == "pmid" and value and not ids_map.get("pmid"):
+                ids_map["pmid"] = value
+            elif kind == "doi" and value and not ids_map.get("doi"):
+                ids_map["doi"] = value
         authors = ", ".join(
             str(a.get("name", "")) for a in (doc.get("authors") or [])[:3]
         )
-        article_url = (
-            f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmc_id}/"
-        )
-        hits.append(BookHit(
+        article_url = f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
+        hits.append(ArticleHit(
             source="PubMed Central",
+            pmid=str(ids_map.get("pmid", "")),
+            pmcid=pmcid,
+            doi=str(ids_map.get("doi", "")),
             title=str(doc.get("title", "") or ""),
             authors=authors,
+            journal=str(doc.get("fulljournalname") or doc.get("source") or ""),
             year=str(doc.get("pubdate", "") or "")[:4],
             url=article_url,
             # acces libre par definition, mais le serveur peut filtrer les
             # robots : l'utilisateur a toujours le lien de secours.
-            download_url=f"{article_url}pdf/",
+            pdf_urls=[f"{article_url}pdf/"],
             note="acces libre (PMC)",
-            extra={"pmc_id": pmc_id},
+            extra={"pmc_id": str(pmc_id)},
         ))
-    return hits
-
-
-def search_literature(query: str, limit: int = 20) -> list[BookHit]:
-    """Interroge les trois sources et concatene les resultats."""
-    hits: list[BookHit] = []
-    errors: list[str] = []
-    for func in (search_pubmed_central, search_internet_archive,
-                 search_open_library):
-        try:
-            hits.extend(func(query, limit=limit))
-        except AcquireError as exc:
-            errors.append(f"{func.__name__} : {exc}")
-    if not hits and errors:
-        raise AcquireError(" | ".join(errors))
     return hits
 
 
@@ -2121,7 +2175,7 @@ def search_pubmed(query: str, limit: int = 20,
 
     if progress is not None:
         progress(f"Recherche PubMed : « {query} » ...")
-    search_data = _get_json(f"{PUBMED_EUTILS}/esearch.fcgi", {
+    search_data = _ncbi_json(f"{PUBMED_EUTILS}/esearch.fcgi", {
         "db": "pubmed",
         "term": query,
         "retmax": str(int(limit)),
@@ -2134,7 +2188,7 @@ def search_pubmed(query: str, limit: int = 20,
 
     if progress is not None:
         progress(f"Details de {len(ids)} article(s) ...")
-    summary = _get_json(f"{PUBMED_EUTILS}/esummary.fcgi", {
+    summary = _ncbi_json(f"{PUBMED_EUTILS}/esummary.fcgi", {
         "db": "pubmed",
         "id": ",".join(ids),
         "retmode": "json",
@@ -2182,6 +2236,252 @@ def search_pubmed(query: str, limit: int = 20,
     if progress is not None:
         progress(f"{len(hits)} article(s) PubMed.")
     return hits
+
+
+# --- recherche multi-sources : fusion et deduplication ------------------------
+@dataclass
+class SearchBundle:
+    """Resultats d'une recherche menee sur plusieurs sources en meme temps."""
+    hits: list = field(default_factory=list)
+    # lignes deja fusionnees (une meme reference trouvee dans deux index)
+    counts: dict = field(default_factory=dict)   # cle de source -> nb de lignes
+    errors: dict = field(default_factory=dict)   # cle de source -> message
+
+
+# Cles et libelles connus de l'interface (meme cles que le composant de choix)
+SEARCH_SOURCES = (
+    ("pubmed", "PubMed", search_pubmed),
+    ("pmc", "PubMed Central", search_pubmed_central),
+    ("ia", "Internet Archive", search_internet_archive),
+    ("ol", "Open Library", search_open_library),
+)
+
+
+def _fold_title(title: str) -> str:
+    """Titre normalise pour la deduplication : sans accents ni ponctuation."""
+    text = unicodedata.normalize("NFKD", str(title or ""))
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", "", text.casefold())
+
+
+def literature_key(hit) -> str:
+    """Cle d'identite **fiable** d'un resultat : DOI, PMID/PMCID, cles IA/OL.
+
+    Chaine vide quand l'objet ne porte aucun identifiant exploitable.
+    """
+    extra = dict(getattr(hit, "extra", None) or {})
+    if isinstance(hit, ArticleHit):
+        doi = str(hit.doi or "").strip().casefold()
+        for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+            if doi.startswith(prefix):
+                doi = doi[len(prefix):]
+        if doi:
+            return f"doi:{doi}"
+        if hit.pmid:
+            return f"pmid:{hit.pmid}"
+        if hit.pmcid:
+            return f"pmcid:{str(hit.pmcid).casefold()}"
+    else:
+        if extra.get("pmcid"):
+            return f"pmcid:{str(extra['pmcid']).casefold()}"
+        if extra.get("openlibrary_key"):
+            return f"ol:{extra['openlibrary_key']}"
+        if extra.get("identifier"):
+            return f"ia:{extra['identifier']}"
+    return ""
+
+
+def literature_keys(hit) -> list[str]:
+    """Toutes les cles d'un resultat, de la plus fiable a la plus approchee.
+
+    Un ouvrage d'Open Library et sa copie d'Internet Archive portent des
+    identifiants pourtant differents : c'est le titre normalise qui unifie
+    ces doubles. Il passe en second rang, jamais a la place d'un identifiant
+    exact ; l'annee n'entre pas dans la cle mais est comparee au moment de
+    la fusion (une annee manquante n'est pas un desaccord).
+    """
+    cles = [key for key in (literature_key(hit),) if key]
+    titre = _fold_title(getattr(hit, "title", ""))
+    if titre:
+        cles.append(f"titre:{titre}")
+    return cles
+
+
+def _annee(hit) -> str:
+    """Annee d'un resultat sur quatre caracteres, vide si absente."""
+    return str(getattr(hit, "year", "") or "").strip()[:4]
+
+
+def _richesse(hit) -> int:
+    """Poids d'un resultat : le plus complet (identifiants, PDF) survit."""
+    extra = dict(getattr(hit, "extra", None) or {})
+    score = 0
+    if isinstance(hit, ArticleHit):
+        score += 4
+        score += 2 if hit.doi else 0
+        score += 1 if hit.pmid else 0
+        score += 1 if hit.pmcid else 0
+        score += min(len(hit.pdf_urls or []), 3)
+    if getattr(hit, "download_url", "") or extra.get("free"):
+        score += 1
+    if getattr(hit, "journal", "") or getattr(hit, "note", ""):
+        score += 1
+    return score
+
+
+def _merge_source(a: str, b: str) -> str:
+    """Etiquettes de provenance reunies : « PubMed + PMC », sans doublon."""
+    parts: list[str] = []
+    for etiquette in (str(a or ""), str(b or "")):
+        for part in etiquette.split(" + "):
+            part = part.strip()
+            if part and part not in parts:
+                parts.append(part)
+    return " + ".join(parts)
+
+
+def _fusionne(kept, other) -> None:
+    """Ajoute a `kept` ce que `other` apporte (une meme reference, deux sources)."""
+    kept.source = _merge_source(kept.source, other.source)
+    extra = dict(getattr(kept, "extra", None) or {})
+    autre_extra = dict(getattr(other, "extra", None) or {})
+    for cle, valeur in autre_extra.items():
+        extra.setdefault(cle, valeur)
+    # provenance : toutes les etiquettes de la fusion, dans l'ordre de rencontre
+    provenance = list(extra.get("sources") or [])
+    for etiquette in str(kept.source or "").split(" + "):
+        etiquette = etiquette.strip()
+        if etiquette and etiquette not in provenance:
+            provenance.append(etiquette)
+    if provenance:
+        extra["sources"] = provenance
+    # champs d'identite : jamais ecrases par une source plus pauvre
+    for champ in ("title", "authors", "year", "url", "note"):
+        if not str(getattr(kept, champ, "") or "") \
+                and str(getattr(other, champ, "") or ""):
+            setattr(kept, champ, getattr(other, champ))
+    if isinstance(kept, ArticleHit) and isinstance(other, ArticleHit):
+        if not kept.pmid and other.pmid:
+            kept.pmid = other.pmid
+        if not kept.pmcid and other.pmcid:
+            kept.pmcid = other.pmcid
+        if not kept.doi and other.doi:
+            kept.doi = other.doi
+        if not kept.journal and other.journal:
+            kept.journal = other.journal
+        for lien in other.pdf_urls or []:
+            if lien not in kept.pdf_urls:
+                kept.pdf_urls.append(lien)
+    elif isinstance(kept, ArticleHit):
+        # un livre (IA / Open Library) apporte son propre lien de fichier
+        if autre_extra.get("pmcid") and not kept.pmcid:
+            kept.pmcid = str(autre_extra["pmcid"])
+        lien = str(getattr(other, "download_url", "") or "")
+        if lien and lien not in kept.pdf_urls:
+            kept.pdf_urls.append(lien)
+    kept.extra = extra
+
+
+def merge_literature_hits(hits) -> list:
+    """Supprime les doublons : une meme reference trouvee dans deux index."""
+    sortie: list = []
+    index: dict[str, int] = {}
+    for hit in hits:
+        cles = literature_keys(hit)
+        pos = None
+        for cle in cles:
+            candidat = index.get(cle)
+            if candidat is None:
+                continue
+            if cle.startswith("titre:"):
+                # un titre commun ne prouve rien au sein d'une meme source :
+                # deux ouvrages differents peuvent partager titre et annee
+                deja = set(str(sortie[candidat].source or "").split(" + "))
+                if not set(str(hit.source or "").split(" + ")) - deja:
+                    continue
+                # deux annees renseignees et differentes : pas la meme chose
+                gauche, droite = _annee(sortie[candidat]), _annee(hit)
+                if gauche and droite and gauche != droite:
+                    continue
+            pos = candidat
+            break
+        if pos is None:
+            for cle in cles:
+                index.setdefault(cle, len(sortie))
+            sortie.append(hit)
+            continue
+        garde = sortie[pos]
+        if _richesse(hit) > _richesse(garde):
+            _fusionne(hit, garde)
+            sortie[pos] = hit
+        else:
+            _fusionne(garde, hit)
+        # les cles de la ligne absorbee rejoignent la reference conservee
+        for cle in cles:
+            index.setdefault(cle, pos)
+    return sortie
+
+
+def search_literature(query: str, sources: Optional[list] = None,
+                      limit: int = 20, progress: Progress = None
+                      ) -> SearchBundle:
+    """Interroge plusieurs sources **en parallele** et fusionne les resultats.
+
+    `sources` : cles de `SEARCH_SOURCES` (defaut : toutes). Une source en
+    echec n'interrompt pas les autres : son message est porte par
+    `bundle.errors`, et seules les erreurs de toutes les sources font echouer
+    la recherche. Les doublons sont fusionnes, la provenance restant lisible
+    dans `source` (« PubMed + PMC ») et dans `extra["sources"]`.
+    """
+    query = (query or "").strip()
+    if not query:
+        raise AcquireError("Requete de recherche vide.")
+    selection = [s for s in SEARCH_SOURCES
+                 if sources is None or s[0] in set(sources or ())]
+    if not selection:
+        raise AcquireError(f"Source de recherche inconnue : {sources!r}")
+    libelles = {cle: nom for cle, nom, _ in selection}
+    if progress is not None:
+        progress(f"Recherche dans {len(selection)} sources : "
+                 + ", ".join(libelles.values()) + " ...")
+
+    bundle = SearchBundle()
+    bruts: list = []
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(4, len(selection))) as pool:
+        # ordre de soumission conserve : PubMed d'abord, puis PMC, IA, OL
+        futurs = [(pool.submit(func, query, limit=limit), cle)
+                  for cle, _nom, func in selection]
+        for futur, cle in futurs:
+            try:
+                trouves = futur.result()
+            except AcquireError as exc:
+                bundle.errors[cle] = str(exc)
+            except Exception as exc:  # noqa: BLE001 - une source muette n'arrete pas les autres
+                bundle.errors[cle] = f"{type(exc).__name__} : {exc}"
+            else:
+                bundle.counts[cle] = len(trouves)
+                bruts.extend(trouves)
+    bundle.hits = merge_literature_hits(bruts)
+
+    if progress is not None:
+        message = f"{len(bruts)} resultat(s) trouves"
+        if bundle.counts:
+            message += " (" + ", ".join(
+                f"{libelles[cle]} {count}" for cle, count in bundle.counts.items()
+            ) + ")"
+        message += f" -> {len(bundle.hits)} apres fusion."
+        if bundle.errors:
+            message += " Sources en echec : " + " | ".join(
+                f"{libelles[cle]} : {err}" for cle, err in bundle.errors.items()
+            )
+        progress(message)
+
+    if not bruts and len(bundle.errors) == len(selection):
+        raise AcquireError(" | ".join(
+            f"{libelles[cle]} : {err}" for cle, err in bundle.errors.items()
+        ))
+    return bundle
 
 
 def _epmc_pdf_urls_by_pmid(pmids: list[str]) -> dict[str, list[str]]:

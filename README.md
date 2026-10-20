@@ -287,9 +287,21 @@ article ou un livre…* propose plusieurs sources :
 | Source | Contenu |
 |--------|---------|
 | **PubMed** | références indexées (E-utilities du NCBI, enrichissement Europe PMC) |
-| **PubMed Central** | articles en accès libre (E-utilities) |
+| **PubMed Central** | articles en accès libre (E-utilities, **tri par pertinence** — le tri par défaut de PMC est la date de publication) |
 | **Internet Archive** | téléchargement seulement si l'élément est **domaine public** — le nom réel du fichier est résolu au moment du téléchargement via l'API `metadata` (les scans sont en `{id}_djvu.pdf`, les dépôts ont des noms arbitraires) |
 | **Open Library** | métadonnées et accès en ligne ; le téléchargement n'est proposé que pour les ouvrages en accès **public**, les emprunts et les fichiers sans version numérique restant des liens de consultation |
+
+Par défaut, le choix **« Toutes les sources »** interroge les quatre sources
+**en parallèle** : la panne d'une source n'interrompt pas les autres et son
+message s'affiche sous le tableau, avec le nombre de lignes apportées par
+chaque source. Les **doublons** d'une même référence sont fusionnés en une
+ligne — PubMed et PubMed Central publient le même article, Internet Archive
+héberge souvent le même livre qu'Open Library — la provenance restant lisible
+dans la colonne *Source* (`PubMed + PubMed Central`). L'identification passe
+par le DOI, puis le PMID/PMCID, puis le titre normalisé (avec année) ; les
+en-têtes `tool`/`email` demandés par le NCBI sont envoyés, les appels sont
+cadencés et repris après un refus de débit (`429`), ce qui autorise les deux
+recherches E-utilities simultanées.
 
 Un **double-clic sur un résultat** tente le téléchargement du document (PDF,
 EPUB ou texte, selon ce que contient réellement l'élément) ; à défaut,

@@ -641,14 +641,17 @@ class SynonymsDialog(QDialog):
 
 
 class BookSearchDialog(QDialog):
-    """Recherche bibliographique multi-sources, puis import du PDF en accès libre.
+    """Recherche bibliographique multi-sources, puis import du document libre.
 
     Sources : PubMed et PubMed Central (articles), Internet Archive et Open
-    Library (livres). Un double-clic tente le téléchargement du PDF ; s'il n'y
-    a pas de PDF libre, la page de la référence s'ouvre dans le navigateur.
+    Library (livres) — **toutes interrogées en une passe** par défaut, avec
+    fusion des doublons. Un double-clic tente le téléchargement (PDF, EPUB ou
+    texte) ; s'il n'y a pas d'accès libre, la page de la référence s'ouvre
+    dans le navigateur.
     """
 
     SOURCES = (
+        ("Toutes les sources", "all"),
         ("PubMed (articles scientifiques)", "pubmed"),
         ("PubMed Central (articles en accès libre)", "pmc"),
         ("Internet Archive (livres en accès libre)", "ia"),
@@ -725,8 +728,8 @@ class BookSearchDialog(QDialog):
         layout.addWidget(self.table, 1)
 
         self.status = QLabel(
-            "Sources : PubMed, PubMed Central, Internet Archive, Open Library.\n"
-            + self.NOTE
+            "Toutes les sources interrogées en une passe (PubMed, PubMed "
+            "Central, Internet Archive, Open Library).\n" + self.NOTE
         )
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -747,7 +750,10 @@ class BookSearchDialog(QDialog):
 
     # -- recherche -------------------------------------------------------
     @staticmethod
-    def _run_search(key: str, query: str, progress) -> list:
+    def _run_search(key: str, query: str, progress):
+        """Renvoie une liste (source unique) ou un SearchBundle (toutes)."""
+        if key == "all":
+            return sb.search_literature(query, progress=progress)
         if key == "pubmed":
             return sb.search_pubmed(query, progress=progress)
         if key == "pmc":
@@ -757,6 +763,11 @@ class BookSearchDialog(QDialog):
         if key == "ol":
             return sb.search_open_library(query)
         raise sb.AcquireError(f"Source de recherche inconnue : {key}")
+
+    @Slot(str)
+    def _status_message(self, message: str) -> None:
+        """Suivi d'avancement emis par un worker (recherche ou téléchargement)."""
+        self.status.setText(message)
 
     def start_search(self) -> None:
         query = self.field.text().strip()
@@ -769,6 +780,7 @@ class BookSearchDialog(QDialog):
             lambda progress, fraction: self._run_search(key, query, progress)
         )
         self._workers.append(worker)
+        worker.signals.message.connect(self._status_message)
         worker.signals.finished.connect(self._on_results)
         worker.signals.failed.connect(self._on_failed)
         self.pool.start(worker)
@@ -777,9 +789,11 @@ class BookSearchDialog(QDialog):
     def _source_changed(self) -> None:
         self._hits = []
         self.table.setRowCount(0)
-        self.status.setText(
-            f"Source : {self.source.currentText()}.\n{self.NOTE}"
-        )
+        libelle = self.source.currentText()
+        if str(self.source.currentData()) == "all":
+            self.status.setText(f"Recherche dans : {libelle.lower()}.\n{self.NOTE}")
+        else:
+            self.status.setText(f"Source : {libelle}.\n{self.NOTE}")
         self._update_buttons()
 
     @Slot()
@@ -815,10 +829,41 @@ class BookSearchDialog(QDialog):
             return True
         return bool((getattr(hit, "extra", None) or {}).get("free"))
 
+    HINT = ("Double-clic : téléchargement si l'accès est libre (PDF, EPUB "
+            "ou texte), sinon ouverture de la page.")
+
+    @staticmethod
+    def _source_labels() -> dict:
+        """Libelles humains des cles de source (mêmes cles que le backend)."""
+        return {cle: nom for cle, nom, _ in sb.SEARCH_SOURCES}
+
+    @classmethod
+    def _bundle_status(cls, bundle, vide: bool = False) -> str:
+        """Compte de lignes par source, puis les sources restées en échec."""
+        libelles = cls._source_labels()
+        if vide:
+            texte = "Aucun résultat pour cette recherche."
+        else:
+            detail = " · ".join(
+                f"{libelles.get(cle, cle)} {count}"
+                for cle, count in bundle.counts.items()
+            )
+            texte = f"{len(bundle.hits)} résultat(s)"
+            if detail:
+                texte += f" — {detail}"
+            texte += "."
+        if bundle.errors:
+            texte += " Sources en échec : " + " | ".join(
+                f"{libelles.get(cle, cle)} : {err}"
+                for cle, err in bundle.errors.items()
+            )
+        return texte
+
     @Slot(object)
-    def _on_results(self, hits) -> None:
+    def _on_results(self, result) -> None:
         self.button.setEnabled(True)
-        self._hits = list(hits)
+        bundle = result if isinstance(result, sb.SearchBundle) else None
+        self._hits = list(bundle.hits if bundle is not None else result)
         self.table.setRowCount(0)
         for hit in self._hits:
             row = self.table.rowCount()
@@ -829,13 +874,15 @@ class BookSearchDialog(QDialog):
             ]
             for col, value in enumerate(values):
                 self.table.setItem(row, col, QTableWidgetItem(str(value)))
-        self.status.setText(
-            f"{len(self._hits)} résultat(s). "
-            "Double-clic : téléchargement si l'accès est libre (PDF, EPUB ou "
-            "texte), sinon ouverture de la page."
-            if self._hits
-            else "Aucun résultat pour cette recherche."
-        )
+        if not self._hits:
+            texte = (self._bundle_status(bundle, vide=True)
+                     if bundle is not None
+                     else "Aucun résultat pour cette recherche.")
+        elif bundle is not None:
+            texte = f"{self._bundle_status(bundle)} {self.HINT}"
+        else:
+            texte = f"{len(self._hits)} résultat(s). {self.HINT}"
+        self.status.setText(texte)
         if self._hits:
             self.table.selectRow(0)
         self._update_buttons()
@@ -912,6 +959,7 @@ class BookSearchDialog(QDialog):
 
         worker = Worker(_job)
         self._workers.append(worker)
+        worker.signals.message.connect(self._status_message)
         worker.signals.finished.connect(self._on_downloaded)
         worker.signals.failed.connect(self._on_download_failed)
         self.pool.start(worker)
