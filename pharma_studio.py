@@ -734,7 +734,7 @@ class BookSearchDialog(QDialog):
         line2 = QHBoxLayout()
         self.open_button = QPushButton("Ouvrir la page", self)
         self.open_button.clicked.connect(self.open_page)
-        self.download_button = QPushButton("Télécharger le PDF", self)
+        self.download_button = QPushButton("Télécharger le document", self)
         self.download_button.clicked.connect(self.start_download)
         self.close_button = QPushButton("Fermer", self)
         self.close_button.clicked.connect(self.reject)
@@ -808,7 +808,12 @@ class BookSearchDialog(QDialog):
             # toujours tentable : a defaut de PDF editeur, le texte integral
             # PMC sert de repli (voir download_article et fulltext_html)
             return bool(hit.pdf_urls or hit.doi or hit.pmid or hit.pmcid)
-        return bool(getattr(hit, "download_url", ""))
+        # livre : URL directe connue, ou acces libre annonce par la source.
+        # Le nom reel du fichier n'est pas encore connu (voir
+        # sb.resolve_book_download) : on ne le demande qu'au telechargement.
+        if getattr(hit, "download_url", ""):
+            return True
+        return bool((getattr(hit, "extra", None) or {}).get("free"))
 
     @Slot(object)
     def _on_results(self, hits) -> None:
@@ -826,8 +831,8 @@ class BookSearchDialog(QDialog):
                 self.table.setItem(row, col, QTableWidgetItem(str(value)))
         self.status.setText(
             f"{len(self._hits)} résultat(s). "
-            "Double-clic : téléchargement du PDF si l'accès est libre, "
-            "sinon ouverture de la page."
+            "Double-clic : téléchargement si l'accès est libre (PDF, EPUB ou "
+            "texte), sinon ouverture de la page."
             if self._hits
             else "Aucun résultat pour cette recherche."
         )
@@ -895,9 +900,13 @@ class BookSearchDialog(QDialog):
                     progress=progress, fraction=fraction,
                     fallback=fallback, email=email,
                 )
+            # livre : l'URL reelle (PDF, EPUB ou texte) vient de l'API
+            # metadata d'Internet Archive, au moment du telechargement.
+            url, ext, libelle = sb.resolve_book_download(hit, progress=progress)
+            progress(f"Telechargement ({libelle}) : {url} ...")
+            stem = sb.slugify(hit.title or "document", fallback="document")
             return sb.download_file(
-                hit.download_url, directory,
-                filename=f"{hit.title or 'document'}.pdf",
+                url, directory, filename=f"{stem}{ext}",
                 fraction=fraction, root=root,
             )
 

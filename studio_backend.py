@@ -70,6 +70,7 @@ OPENALEX_API = "https://api.openalex.org"
 UNPAYWALL_API = "https://api.unpaywall.org/v2"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper"
 IA_SEARCH = "https://archive.org/advancedsearch.php"
+IA_METADATA = "https://archive.org/metadata"      # /{IA_METADATA}/{identifiant}
 OL_SEARCH = "https://openlibrary.org/search.json"
 
 # Unpaywall exige une adresse de contact pour l'API gratuite :
@@ -1854,17 +1855,21 @@ def search_open_library(query: str, limit: int = 20) -> list[BookHit]:
             "printdisabled": "accessible en lecture adaptee uniquement",
             "no_ebook": "pas de version numerique libre",
         }.get(access, access or "acces en ligne")
+        # `download_url` reste vide : `archive.org/details/{id}` est une page
+        # web, pas un fichier, et un element « borrowable » n'est pas libre.
+        # Le vrai fichier est choisi au moment du telechargement (voir
+        # `resolve_book_download`), d'apres les propres metadonnees IA.
         hits.append(BookHit(
             source="Open Library",
             title=str(doc.get("title", "") or ""),
             authors=", ".join(str(a) for a in (doc.get("author_name") or [])[:3]),
             year=str(doc.get("first_publish_year", "") or ""),
             url=f"https://openlibrary.org{key}" if key else "",
-            download_url=(
-                f"https://archive.org/details/{ia_ids[0]}" if ia_ids else ""
-            ),
+            download_url="",
             note=note,
-            extra={"openlibrary_key": key, "ia": ia_ids},
+            extra={"openlibrary_key": key, "ia": ia_ids,
+                   "ebook_access": access,
+                   "free": bool(ia_ids) and access == "public"},
         ))
     return hits
 
@@ -1911,15 +1916,117 @@ def search_internet_archive(query: str, limit: int = 20) -> list[BookHit]:
             authors=", ".join(str(c) for c in creators[:3]),
             year=str(doc.get("year", "") or ""),
             url=f"https://archive.org/details/{identifier}" if identifier else "",
-            download_url=(
-                f"https://archive.org/download/{identifier}/{identifier}.pdf"
-                if identifier and free else ""
-            ),
+            # nom de fichier devine : les scans sont en `{id}_djvu.pdf` et les
+            # depots ont des noms arbitraires — l'URL reelle vient de l'API
+            # metadata au moment du telechargement.
+            download_url="",
             note="domaine public : telechargement direct" if free
                  else "consultation / emprunt en ligne",
-            extra={"identifier": identifier, "public_domain": free},
+            extra={"identifier": identifier, "public_domain": free,
+                   "free": bool(identifier) and free},
         ))
     return hits
+
+
+# Choix du fichier a telecharger pour un element Internet Archive : d'abord le
+# PDF (les scans sont en `{id}_djvu.pdf`), puis l'EPUB, enfin le texte. La
+# selection est positive : images, archives et fichiers annexes sont ecartes.
+IA_FORMAT_TIERS = (
+    ("PDF", lambda name, fmt: name.endswith(".pdf") or "pdf" in fmt),
+    ("EPUB", lambda name, fmt: name.endswith(".epub") or fmt == "epub"),
+    ("texte", lambda name, fmt: name.endswith(".txt")
+     or fmt in {"text", "djvutxt"}),
+)
+IA_EXTENSIONS = {"PDF": ".pdf", "EPUB": ".epub", "texte": ".txt"}
+
+
+def ia_item_info(identifier: str) -> dict:
+    """Metadonnees d'un element Internet Archive (`IA_METADATA/{id}`).
+
+    Un seul appel fournit les droits (`rights`, `licenseurl`, `collection`)
+    et la liste reelle des fichiers : c'est la seule facon fiable de connaitre
+    leur nom, les scans etant en `{id}_djvu.pdf` et les depots ayant des noms
+    arbitraires. Leve AcquireError si l'API est inaccessible ou si l'element
+    est introuvable.
+    """
+    ident = str(identifier or "").strip()
+    if not ident:
+        raise AcquireError("Identifiant Internet Archive manquant.")
+    data = _get_json(f"{IA_METADATA}/{quote(ident, safe='')}")
+    if not isinstance(data, dict):
+        raise AcquireError(f"Reponse illisible pour l'element {ident}.")
+    erreur = data.get("error")
+    if erreur:
+        raise AcquireError(f"Element introuvable ({ident}) : {erreur}")
+    return data
+
+
+def ia_pick_file(files) -> tuple[str, str]:
+    """(nom de fichier, libelle de format) le plus exploitable d'une liste.
+
+    Retourne ("", "") si aucun fichier PDF, EPUB ou texte n'est present.
+    """
+    for libelle, match in IA_FORMAT_TIERS:
+        for entry in files or ():
+            if not isinstance(entry, dict) or entry.get("private"):
+                continue
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            fmt = str(entry.get("format") or "").casefold()
+            if match(name.casefold(), fmt):
+                return name, libelle
+    return "", ""
+
+
+def resolve_book_download(hit: BookHit, progress: Progress = None
+                          ) -> tuple[str, str, str]:
+    """(URL, extension, libelle) du fichier libre a telecharger pour `hit`.
+
+    Open Library ne donne qu'une page `details/` — pas un fichier — et
+    Internet Archive ne signale jamais le nom reel de ses PDF : on interroge
+    l'API metadata **au moment du telechargement**, en une seule requete (pas
+    une par ligne de resultat), puis on retient le premier format exploitable.
+    Leve AcquireError si l'element n'est pas libre, s'il a disparu ou s'il ne
+    contient rien d'utilisable.
+    """
+    extra = dict(getattr(hit, "extra", None) or {})
+    ident = str(extra.get("identifier") or "")
+    if not ident:
+        ia_ids = extra.get("ia") or []
+        ident = str(ia_ids[0]) if ia_ids else ""
+    if not ident:
+        url = str(getattr(hit, "download_url", "") or "")
+        if url:
+            return url, ".pdf", "PDF"
+        raise AcquireError(
+            "Aucun telechargement libre n'est connu pour cet element."
+        )
+
+    if progress is not None:
+        progress(f"Verification de l'acces libre (Internet Archive : "
+                 f"{ident}) ...")
+    info = ia_item_info(ident)
+    # droit constate par la source (recherche) ou par l'element lui-meme
+    free = bool(extra.get("free")) or _ia_is_downloadable(
+        info.get("metadata") or {}
+    )
+    if not free:
+        raise AcquireError(
+            "Element non libre de droits : consultation ou emprunt en ligne "
+            "uniquement (voir « Ouvrir la page »)."
+        )
+    name, libelle = ia_pick_file(info.get("files") or [])
+    if not name:
+        raise AcquireError(
+            "Aucun fichier exploitable (PDF, EPUB ou texte) dans cet element."
+        )
+    ext = Path(name).suffix.lower() or IA_EXTENSIONS.get(libelle, ".pdf")
+    url = (f"https://archive.org/download/{quote(ident, safe='')}"
+           f"/{quote(name, safe='/')}")
+    if progress is not None:
+        progress(f"Fichier retenu : {name} ({libelle}).")
+    return url, ext, libelle
 
 
 def search_pubmed_central(query: str, limit: int = 20) -> list[BookHit]:

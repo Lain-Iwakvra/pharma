@@ -256,7 +256,7 @@ sur chaque dossier :
 | **Ajouter le PDF d'une page Wikipédia…** | télécharge le PDF de la page dont vous donnez le titre |
 | **Ajouter le PDF d'une page PsychonautWiki…** | récupère la page PsychonautWiki et la rend en PDF (figures intégrées, feuille de style d'impression) |
 | **Ajouter un document existant…** | importe un PDF, texte, image, HTML ou EPUB du disque |
-| **Rechercher un article ou un livre…** | cherche dans les sources **libres** et importe le PDF obtenu |
+| **Rechercher un article ou un livre…** | cherche dans les sources **libres** et importe le document obtenu (PDF, EPUB ou texte) |
 
 Le clic droit sur un dossier propose aussi *Régénérer le résumé* (relance le
 parser) et *Placer dans la corbeille* (déplacement réversible dans
@@ -288,12 +288,13 @@ article ou un livre…* propose plusieurs sources :
 |--------|---------|
 | **PubMed** | références indexées (E-utilities du NCBI, enrichissement Europe PMC) |
 | **PubMed Central** | articles en accès libre (E-utilities) |
-| **Internet Archive** | téléchargement direct seulement si l'élément est **domaine public** |
-| **Open Library** | métadonnées et accès en ligne |
+| **Internet Archive** | téléchargement seulement si l'élément est **domaine public** — le nom réel du fichier est résolu au moment du téléchargement via l'API `metadata` (les scans sont en `{id}_djvu.pdf`, les dépôts ont des noms arbitraires) |
+| **Open Library** | métadonnées et accès en ligne ; le téléchargement n'est proposé que pour les ouvrages en accès **public**, les emprunts et les fichiers sans version numérique restant des liens de consultation |
 
-Un **double-clic sur un résultat** tente le téléchargement du PDF ; à défaut,
-la page de la référence s'ouvre dans le navigateur. Recherche du PDF, dans
-cet ordre :
+Un **double-clic sur un résultat** tente le téléchargement du document (PDF,
+EPUB ou texte, selon ce que contient réellement l'élément) ; à défaut,
+la page de la référence s'ouvre dans le navigateur. Pour les **articles**,
+recherche du PDF, dans cet ordre :
 
 1. liens PDF d'**Europe PMC** ;
 2. `oa_url` et `locations` d'**OpenAlex** (par DOI, puis PMID) ;
@@ -304,8 +305,9 @@ cet ordre :
    localement ;
 5. les liens `?pdf=render` d'Europe PMC (souvent bloqués hors navigateur).
 
-Chaque URL est testée et validée (`%PDF`) avec les en-têtes d'un navigateur
-classique. **Repli texte intégral** : quand les PDF d'éditeurs refusent les
+Chaque URL est testée et validée (signature `%PDF` pour les PDF) avec les
+en-têtes d'un navigateur classique. **Repli texte intégral** : quand les PDF
+d'éditeurs refusent les
 robots (403 fréquent), l'API **Europe PMC** livre le texte JATS des articles
 en accès libre, converti localement en HTML puis PDF (titre, résumé,
 sections, tableaux, références).
