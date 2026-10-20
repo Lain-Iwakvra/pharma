@@ -641,8 +641,12 @@ Première version stable, qui rassemble :
   éditeur de synonymes, thème clair / sombre et **mise en forme soignée
   commune aux deux thèmes** ;
 * **imports et recherche** : PDF Wikipédia / PsychonautWiki, documents locaux,
-  recherche PubMed / Internet Archive / Open Library avec récupération des PDF
-  en accès libre.
+  recherche bibliographique dans **quatre sources interrogées en une passe**
+  (PubMed, PubMed Central, Internet Archive, Open Library) avec fusion des
+  doublons, et récupération des documents en accès libre : PDF des articles
+  (Europe PMC → OpenAlex → Semantic Scholar → Unpaywall → plein texte PMC),
+  livres PDF / EPUB / texte dont le fichier réel est résolu via l'API
+  `metadata` d'Internet Archive.
 
 ---
 
