@@ -5439,7 +5439,10 @@ class MainWindow(QMainWindow):
         self._compare_queue: list[dict] = []
         self._add_queue: list[tuple[Path, str, bool]] = []
         self._compare_items_cache: list[dict] | None = None
-        self._research_sizes: list[int] = []
+        # largeur donnée à l'explorateur, mémorisée par onglet (0 à 3) : le
+        # choix de l'utilisateur survit aux changements d'onglet et aux
+        # redémarrages (voir _store_explorer_size / _restore_explorer_size).
+        self._explorer_sizes: dict[int, list[int]] = self._load_explorer_sizes()
         self.compare = ComparePane(self)
         self.compare.addRequested.connect(self._compare_add_dialog)
         self.compare.removeRequested.connect(self._compare_remove_selected)
@@ -6918,6 +6921,13 @@ class MainWindow(QMainWindow):
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
         self.settings.setValue("splitter", self.splitter.saveState())
+        # largeur de l'explorateur par onglet : le réglage fait sur
+        # Comparaison / Interactions / Calendrier survit au redémarrage.
+        self.settings.setValue(
+            "explorer_sizes",
+            json.dumps({str(page): sizes
+                        for page, sizes in self._explorer_sizes.items()}),
+        )
         self.settings.sync()
         super().closeEvent(event)
 
@@ -6927,22 +6937,43 @@ class MainWindow(QMainWindow):
         Calendrier (3) et Pharmacocinétique (4)."""
         self.pages.setCurrentIndex(max(0, min(int(index), 4)))
 
+    def _load_explorer_sizes(self) -> dict[int, list[int]]:
+        """Largeurs de l'explorateur memorisees par onglet (session anterieure)."""
+        try:
+            raw = json.loads(str(self.settings.value("explorer_sizes", "{}")))
+        except ValueError:
+            return {}
+        sizes: dict[int, list[int]] = {}
+        if not isinstance(raw, dict):
+            return sizes
+        for key, value in raw.items():
+            try:
+                page = int(str(key))
+            except ValueError:
+                continue
+            if page in (0, 1, 2, 3) and isinstance(value, list) and value and all(
+                isinstance(v, int) and v > 0 for v in value
+            ):
+                sizes[page] = [int(v) for v in value]
+        return sizes
+
     def _page_changed(self, index: int) -> None:
         """Un seul explorateur : il est deplace dans la page active.
 
         QSplitter n'a pas de « removeWidget » : le simple fait d'inserer le
         widget dans l'autre splitter le reparente (l'ancien splitter le perd
-        de lui-meme).
+        de lui-meme). La largeur de l'explorateur est memorisee dans chaque
+        page au moment du depart : revenir sur une page retrouve le choix de
+        l'utilisateur ; une page jamais vue demarre au plancher (320 px).
         """
         if index in (1, 2, 3):
             target = {1: self.compare_splitter,
                       2: self.interactions_splitter,
                       3: self.calendar_splitter}[index]
             if self.workspace.parent() is not target:
-                if self.workspace.parent() is self.splitter:
-                    self._research_sizes = self.splitter.sizes()
+                self._store_explorer_size()
                 target.insertWidget(0, self.workspace)
-                target.setSizes([self.workspace.minimumWidth(), 920])
+                self._restore_explorer_size(index, target)
             self.workspace.setVisible(self.toggle_left.isChecked())
             if index == 1:
                 self._compare_activate()
@@ -6954,18 +6985,49 @@ class MainWindow(QMainWindow):
             # la page Pharmacocinétique n'utilise pas l'explorateur : il
             # reste (cache) dans la page Recherche.
             if self.workspace.parent() is not self.splitter:
+                self._store_explorer_size()
                 self.splitter.insertWidget(0, self.workspace)
-                if len(self._research_sizes) == 3:
-                    self.splitter.setSizes(self._research_sizes)
+                self._restore_explorer_size(0, self.splitter)
             self.pharmaco.set_suggestions(self._pharmaco_suggestions())
         else:
             if self.workspace.parent() is not self.splitter:
+                self._store_explorer_size()
                 self.splitter.insertWidget(0, self.workspace)
-                if len(self._research_sizes) == 3:
-                    self.splitter.setSizes(self._research_sizes)
+                self._restore_explorer_size(0, self.splitter)
             self.workspace.setVisible(self.toggle_left.isChecked())
             # de retour en Recherche : le volet droit suit l'onglet courant
             self._sync_summary_from_current_tab()
+
+    def _store_explorer_size(self) -> None:
+        """Note les largeurs du splitter qui porte l'explorateur (page qu'on quitte)."""
+        parent = self.workspace.parent()
+        for page, splitter in enumerate((self.splitter, self.compare_splitter,
+                                         self.interactions_splitter,
+                                         self.calendar_splitter)):
+            if splitter is parent:
+                self._explorer_sizes[page] = list(splitter.sizes())
+                break
+
+    def _restore_explorer_size(self, page: int, target: QSplitter) -> None:
+        """Repose l'explorateur à la largeur memorisee pour l'onglet `page`.
+
+        Les largeurs sont posees deux fois : juste apres l'insertion, la
+        page n'a pas encore sa geometrie finale et Qt repartirait les
+        valeurs a tort ; la seconde pose, au tour de boucle suivant, tombe
+        juste (la fenetre a alors sa taille reelle).
+        """
+        wanted = self._explorer_sizes.get(page)
+        if wanted is None or len(wanted) != target.count():
+            largeur = self.workspace.minimumWidth()
+            wanted = ([largeur, 740, 420] if target.count() == 3
+                      else [largeur, 920])
+        target.setSizes(wanted)
+        QTimer.singleShot(0, lambda: self._repose_explorer_size(target, wanted))
+
+    def _repose_explorer_size(self, target: QSplitter, sizes: list[int]) -> None:
+        """Seconde pose des largeurs, une fois la page geometree."""
+        if len(sizes) == target.count() and self.workspace.parent() is target:
+            target.setSizes(sizes)
 
     def _compare_items(self) -> list[dict]:
         """Liste persistee (nom + dossier) du tableau de comparaison."""

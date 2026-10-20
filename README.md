@@ -207,9 +207,15 @@ Le résumé se met à jour **automatiquement** :
 
 ### Explorateur et lecteur
 
-Le volet est **à sa largeur minimale (320 px) par défaut, sur tous les
-onglets** : il ne prend que la place qu'on lui donne. Il s'élargit à volonté
-en tirant la poignée, et *Affichage → Explorateur* le masque ou le rétablit.
+Le volet est **à sa largeur minimale par défaut, sur tous les onglets** : il
+ne prend que la place qu'on lui donne. Il s'élargit à volonté en tirant la
+poignée, et *Affichage → Explorateur* le masque ou le rétablit.
+
+La largeur réglée est **mémorisée par onglet** : agrandir l'explorateur sur
+*Comparaison* puis passer à *Interactions* ne la réinitialise pas — chaque
+onglet retrouve la largeur qu'on lui a donnée, y compris après un
+redémarrage (Comparaison, Interactions et Calendrier démarrent serrés à la
+première visite, puis gardent leur réglage).
 
 Pendant un **glisser de molécule** (vers le tableau de comparaison, la liste
 des interactions, le calendrier ou la page Pharmacocinétique), le nom glissé
