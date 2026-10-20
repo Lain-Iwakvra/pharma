@@ -54,6 +54,7 @@ from PySide6.QtCore import (
     QMarginsF,
     QMimeData,
     QObject,
+    QPoint,
     QPointF,
     QRectF,
     QRunnable,
@@ -151,6 +152,48 @@ DISCLAIMER = (
 
 # type MIME des glisser-deposer internes : le chemin depose vers le tableau
 PATH_MIME = "application/x-pharma-path"
+# nom de la molecule glissee : information visuelle pendant le geste
+# (etiquette sous le curseur et libelle sous la zone de depot)
+NAME_MIME = "application/x-pharma-name"
+
+
+def dragged_molecule_name(mime: QMimeData) -> str:
+    """Nom de la molécule portée par un glisser interne (« » sinon).
+
+    Le nom voyage avec le chemin (NAME_MIME) : les zones de dépôt
+    l'affichent pendant le geste sans rouvrir le disque.
+    """
+    if mime is None or not mime.hasFormat(NAME_MIME):
+        return ""
+    try:
+        return bytes(mime.data(NAME_MIME)).decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ""
+
+
+class DropHint(QLabel):
+    """Libellé sous une zone de dépôt : information visuelle du glisser.
+
+    Texte d'aide par défaut, nom de la molécule survolée pendant le geste,
+    retour au texte d'aide au relâchement ou quand le curseur quitte la
+    zone. `molecule_text` est un gabarit comportant `{name}` (par exemple
+    « déposez pour l'ajouter au tableau »).
+    """
+
+    def __init__(self, text: str, molecule_text: str, parent=None):
+        super().__init__(text, parent)
+        self._default_text = text
+        self._molecule_text = molecule_text
+        self.setWordWrap(True)
+        self.setStyleSheet("color: palette(mid); padding: 2px 8px;")
+
+    def show_molecule(self, name: str) -> None:
+        """Affiche la molécule en cours de glissement."""
+        self.setText(self._molecule_text.format(name=name))
+
+    def reset(self) -> None:
+        """Repose le texte d'aide (glissement terminé ou annulé)."""
+        self.setText(self._default_text)
 
 
 # --- theme (clair / sombre) ---------------------------------------------------
@@ -1311,13 +1354,41 @@ class WorkspacePane(QWidget):
         return self._path_of(self.tree.currentIndex())
 
     # -- glisser vers le tableau de comparaison --------------------------
-    @staticmethod
-    def _path_mime(path: Path) -> QMimeData:
-        """MIME transporte par un glisser de l'explorateur (chemin cible)."""
+    def _path_mime(self, path: Path) -> QMimeData:
+        """MIME transporte par un glisser de l'explorateur (chemin + nom).
+
+        Le nom de la molécule voyage avec le chemin : les zones de dépôt
+        l'affichent pendant le geste sans rouvrir le disque.
+        """
         mime = QMimeData()
         mime.setData(PATH_MIME, str(path).encode("utf-8"))
+        name = self._molecule_of(path)
+        if name:
+            mime.setData(NAME_MIME, name.encode("utf-8"))
         mime.setText(str(path))
         return mime
+
+    def _molecule_of(self, path: Path) -> str:
+        """Nom porté par `path` pendant un glisser (dossier ou fichier dedans).
+
+        Dossier molécule : son nom (métadonnée ou résumé, sinon le nom du
+        dossier). Racine du répertoire de travail : rien — on ne glisse pas
+        la racine comme une molécule.
+        """
+        if self.root is None:
+            return ""
+        directory = path if path.is_dir() else Path(path).parent
+        if sb.is_workspace_root(directory, self.root):
+            return ""
+        _found, name = sb.locate_molecule(Path(path), self.root)
+        if name:
+            return name
+        try:
+            if Path(directory).resolve().parent == Path(self.root).resolve():
+                return directory.name
+        except OSError:
+            pass
+        return ""
 
     def eventFilter(self, obj, event):  # noqa: N802 - API Qt
         """Glisser (PATH_MIME) apres la distance standard, et touche Suppr.
@@ -1355,7 +1426,31 @@ class WorkspacePane(QWidget):
             return
         drag = QDrag(self.tree)
         drag.setMimeData(self._path_mime(path))
+        # information visuelle : le nom de la molécule glissée suit le
+        # curseur pendant tout le geste (Qt ne fournit aucun retour natif).
+        pixmap = self._drag_pixmap(path)
+        if pixmap is not None:
+            drag.setPixmap(pixmap)
+            # hot spot sous l'étiquette : le nom s'affiche sous le curseur
+            drag.setHotSpot(QPoint(12, pixmap.height() + 6))
         drag.exec(Qt.CopyAction)
+
+    def _drag_pixmap(self, path: Path) -> QPixmap | None:
+        """Etiquette « nom de la molécule » rendue en pixmap (None si vide)."""
+        name = self._molecule_of(path)
+        if not name:
+            return None
+        label = QLabel(name)
+        label.setStyleSheet(
+            "background-color: palette(window);"
+            " color: palette(window-text);"
+            " border: 1px solid palette(mid);"
+            " border-radius: 4px;"
+            " padding: 2px 8px;"
+            " font-weight: bold;"
+        )
+        label.adjustSize()
+        return label.grab()
 
     # -- menus -----------------------------------------------------------
     def _build_add_menu(self) -> QMenu:
@@ -2023,6 +2118,8 @@ class CompareTable(QTableWidget):
         self.viewport().setAcceptDrops(True)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDrop)
+        # libellé posé sous le tableau par le ComparePane (info du glisser)
+        self.drop_hint: DropHint | None = None
 
     # -- glisser-deposer --------------------------------------------------
     @staticmethod
@@ -2033,17 +2130,24 @@ class CompareTable(QTableWidget):
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802 - API Qt
         if self._has_our_mime(event.mimeData()):
+            self._hint_show(event.mimeData())
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802 - API Qt
         if self._has_our_mime(event.mimeData()):
+            self._hint_show(event.mimeData())
             event.acceptProposedAction()
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802 - API Qt
+        self._hint_reset()
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event) -> None:  # noqa: N802 - API Qt
+        self._hint_reset()
         mime = event.mimeData()
         if mime.hasFormat(self.ROW_MIME):
             try:
@@ -2067,6 +2171,16 @@ class CompareTable(QTableWidget):
                 event.ignore()
         else:
             event.ignore()
+
+    def _hint_show(self, mime: QMimeData) -> None:
+        """Nom de la molécule glissée, sous le tableau (libellé d'aide)."""
+        name = dragged_molecule_name(mime)
+        if self.drop_hint is not None and name:
+            self.drop_hint.show_molecule(name)
+
+    def _hint_reset(self) -> None:
+        if self.drop_hint is not None:
+            self.drop_hint.reset()
 
     def _dragged_rows(self) -> list[int]:
         """Indices de `self.rows` correspondant aux lignes selectionnees."""
@@ -2247,6 +2361,16 @@ class ComparePane(QWidget):
         layout.setSpacing(0)
         layout.addWidget(bar)
         layout.addWidget(self.table, 1)
+        # information visuelle du glisser : le nom de la molécule déposée
+        # s'inscrit sous le tableau pendant que le curseur l'y survole.
+        self.hint = DropHint(
+            "Glissez une molécule depuis l'explorateur pour l'ajouter au "
+            "tableau.",
+            "« {name} » — déposez pour l'ajouter au tableau",
+            self,
+        )
+        self.table.drop_hint = self.hint
+        layout.addWidget(self.hint)
 
         self.show_rows([])
 
@@ -2548,6 +2672,8 @@ class MoleculeList(QListWidget):
         self.setDragDropMode(QAbstractItemView.DropOnly)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setAlternatingRowColors(True)
+        # libellé posé sous la liste par l'InteractionsPane (info du glisser)
+        self.drop_hint: DropHint | None = None
         self.setToolTip(
             "Glissez une molécule depuis l'explorateur pour l'ajouter à "
             "l'étude d'interactions. La touche Suppr retire la sélection."
@@ -2563,17 +2689,34 @@ class MoleculeList(QListWidget):
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802 - API Qt
         if event.mimeData().hasFormat(PATH_MIME):
+            self._hint_show(event.mimeData())
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802 - API Qt
         if event.mimeData().hasFormat(PATH_MIME):
+            self._hint_show(event.mimeData())
             event.acceptProposedAction()
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802 - API Qt
+        self._hint_reset()
+        super().dragLeaveEvent(event)
+
+    def _hint_show(self, mime: QMimeData) -> None:
+        """Nom de la molécule glissée, sous la liste (libellé d'aide)."""
+        name = dragged_molecule_name(mime)
+        if self.drop_hint is not None and name:
+            self.drop_hint.show_molecule(name)
+
+    def _hint_reset(self) -> None:
+        if self.drop_hint is not None:
+            self.drop_hint.reset()
+
     def dropEvent(self, event) -> None:  # noqa: N802 - API Qt
+        self._hint_reset()
         mime = event.mimeData()
         if not mime.hasFormat(PATH_MIME):
             event.ignore()
@@ -2742,14 +2885,16 @@ class InteractionsPane(QWidget):
         # Suppr dans la liste = « Retirer la sélection » de la barre d'outils
         self.list.removeRequested.connect(self.removeRequested)
         left_layout.addWidget(self.list, 1)
-        hint = QLabel(
+        # information visuelle du glisser : le nom de la molécule survolée
+        # s'inscrit sous la liste, le texte d'aide revient au relâchement.
+        self.hint = DropHint(
             "Glissez une molécule depuis l'explorateur (ou « Ajouter une "
             "molécule… »), puis laissez la base se remplir automatiquement.",
+            "« {name} » — déposez pour l'ajouter à l'étude",
             left,
         )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: palette(mid);")
-        left_layout.addWidget(hint)
+        self.list.drop_hint = self.hint
+        left_layout.addWidget(self.hint)
 
         # volet droit : paires d'interactions
         right = QWidget(self)
@@ -3726,6 +3871,15 @@ class CalendarPane(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(bar)
         layout.addWidget(self.scroll, 1)
+        # information visuelle du glisser : le calendrier accepte le dépôt
+        # sur toute sa surface, le nom de la molécule s'inscrit en dessous.
+        self.drop_hint = DropHint(
+            "Glissez une molécule depuis l'explorateur pour préparer une "
+            "prise.",
+            "« {name} » — déposez pour créer une prise",
+            self,
+        )
+        layout.addWidget(self.drop_hint)
         self._rebuild()
 
     # -- donnees -----------------------------------------------------------
@@ -4431,6 +4585,9 @@ class CalendarPane(QWidget):
     # -- glisser-deposer ---------------------------------------------------
     def dragEnterEvent(self, event) -> None:  # noqa: N802 - API Qt
         if event.mimeData().hasFormat(PATH_MIME):
+            name = dragged_molecule_name(event.mimeData())
+            if name:
+                self.drop_hint.show_molecule(name)
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -4438,7 +4595,12 @@ class CalendarPane(QWidget):
     def dragMoveEvent(self, event) -> None:  # noqa: N802 - API Qt
         self.dragEnterEvent(event)
 
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802 - API Qt
+        self.drop_hint.reset()
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event) -> None:  # noqa: N802 - API Qt
+        self.drop_hint.reset()
         mime = event.mimeData()
         if not mime.hasFormat(PATH_MIME):
             event.ignore()
@@ -4824,6 +4986,16 @@ class PharmacoPane(QWidget):
         buttons.addWidget(clear)
         column.addLayout(buttons)
 
+        # information visuelle du glisser : le nom de la molécule survolée
+        # s'inscrit ici pendant le geste (le dépôt est accepté partout).
+        self.drop_hint = DropHint(
+            "Glissez une molécule depuis l'explorateur pour tracer sa "
+            "courbe.",
+            "« {name} » — déposez pour tracer la courbe",
+            left,
+        )
+        column.addWidget(self.drop_hint)
+
         self.message = QLabel("", left)
         self.message.setWordWrap(True)
         self.message.setStyleSheet("color: #d05555;")
@@ -5107,9 +5279,22 @@ class PharmacoPane(QWidget):
     # -- glisser-deposer depuis l'explorateur -----------------------------
     def dragEnterEvent(self, event) -> None:  # noqa: N802 - API Qt
         if event.mimeData().hasFormat(PATH_MIME):
+            name = dragged_molecule_name(event.mimeData())
+            if name:
+                self.drop_hint.show_molecule(name)
             event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802 - API Qt
+        self.dragEnterEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802 - API Qt
+        self.drop_hint.reset()
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event) -> None:  # noqa: N802 - API Qt
+        self.drop_hint.reset()
         mime = event.mimeData()
         if not mime.hasFormat(PATH_MIME):
             event.ignore()
@@ -5240,10 +5425,13 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.workspace)
         splitter.addWidget(self.tabs)
         splitter.addWidget(self.summary)
-        splitter.setStretchFactor(0, 1)  # explorateur un peu plus large
+        # l'explorateur démarre à sa largeur minimale et ne gonfle pas avec
+        # la fenêtre : tout l'espace gagné va au contenu (redimensionnable
+        # à volonté à la poignée).
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 2)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([340, 740, 420])
+        splitter.setSizes([self.workspace.minimumWidth(), 740, 420])
         self.splitter = splitter
 
         # page « Comparaison » : le meme explorateur (deplace d'une page a
@@ -5269,9 +5457,9 @@ class MainWindow(QMainWindow):
         self.compare.rowsChanged.connect(self._compare_rows_changed)
         self.compare_splitter = QSplitter(Qt.Horizontal, self)
         self.compare_splitter.addWidget(self.compare)
-        self.compare_splitter.setStretchFactor(0, 1)
+        self.compare_splitter.setStretchFactor(0, 0)
         self.compare_splitter.setStretchFactor(1, 3)
-        self.compare_splitter.setSizes([340, 960])
+        self.compare_splitter.setSizes([self.workspace.minimumWidth(), 960])
 
         self.pages = QTabWidget(self)
         self.pages.setDocumentMode(True)
@@ -5312,9 +5500,11 @@ class MainWindow(QMainWindow):
         )
         self.interactions_splitter = QSplitter(Qt.Horizontal, self)
         self.interactions_splitter.addWidget(self.interactions)
-        self.interactions_splitter.setStretchFactor(0, 1)
+        self.interactions_splitter.setStretchFactor(0, 0)
         self.interactions_splitter.setStretchFactor(1, 3)
-        self.interactions_splitter.setSizes([340, 940])
+        self.interactions_splitter.setSizes(
+            [self.workspace.minimumWidth(), 940]
+        )
         self.pages.addTab(self.interactions_splitter, "Interactions")
 
         # page « Calendrier » : journal personnel des prises (molecule,
@@ -5337,9 +5527,11 @@ class MainWindow(QMainWindow):
         self.calendar.dayCurvesRequested.connect(self._calendar_day_curves)
         self.calendar_splitter = QSplitter(Qt.Horizontal, self)
         self.calendar_splitter.addWidget(self.calendar)
-        self.calendar_splitter.setStretchFactor(0, 1)
+        self.calendar_splitter.setStretchFactor(0, 0)
         self.calendar_splitter.setStretchFactor(1, 3)
-        self.calendar_splitter.setSizes([340, 960])
+        self.calendar_splitter.setSizes(
+            [self.workspace.minimumWidth(), 960]
+        )
         self.pages.addTab(self.calendar_splitter, "Calendrier")
 
         # page « Pharmacocinétique » : evolution estimee de la concentration
@@ -6750,7 +6942,7 @@ class MainWindow(QMainWindow):
                 if self.workspace.parent() is self.splitter:
                     self._research_sizes = self.splitter.sizes()
                 target.insertWidget(0, self.workspace)
-                target.setSizes([340, 920])
+                target.setSizes([self.workspace.minimumWidth(), 920])
             self.workspace.setVisible(self.toggle_left.isChecked())
             if index == 1:
                 self._compare_activate()

@@ -207,6 +207,16 @@ Le résumé se met à jour **automatiquement** :
 
 ### Explorateur et lecteur
 
+Le volet est **à sa largeur minimale (320 px) par défaut, sur tous les
+onglets** : il ne prend que la place qu'on lui donne. Il s'élargit à volonté
+en tirant la poignée, et *Affichage → Explorateur* le masque ou le rétablit.
+
+Pendant un **glisser de molécule** (vers le tableau de comparaison, la liste
+des interactions, le calendrier ou la page Pharmacocinétique), le nom glissé
+s'affiche **sous le curseur**, puis **sous la zone de dépôt** survolée ; le
+texte d'aide revient au relâchement. Seuls les dépôts venus de l'explorateur
+sont acceptés — pas les fichiers venus d'autres applications.
+
 Le bouton « + » (barre d'outils ou clic droit), disponible sur la racine comme
 sur chaque dossier :
 
@@ -321,7 +331,8 @@ citant un métabolite) est remplacée par la ligne d'infobox, plus structurée.
   en-têtes, infobulle quand une cellule est tronquée ; liste et colonnes
   conservées au redémarrage.
 * **Gestes** : `Suppr` retire les lignes sélectionnées ; on peut **glisser une
-  molécule** depuis l'explorateur dans le tableau, et **glisser les lignes du
+  molécule** depuis l'explorateur dans le tableau (son nom s'affiche sous le
+  curseur, puis sous le tableau), et **glisser les lignes du
   tableau** pour les réordonner (le tri en cours est alors effacé, l'ordre
   manuel prime).
 * « Vider » ne supprime que le tableau : aucun dossier n'est touché.
@@ -356,9 +367,9 @@ rapprochement de données.
 
 * **Liste des molécules** à gauche : « Ajouter une molécule… »
   (autocomplétion sur les molécules du répertoire et la base DDInter, plusieurs
-  noms séparés par `;`), **glisser depuis l'explorateur**, ou clic droit →
-  *Ajouter aux interactions*. Les dépôts venus d'autres applications sont
-  ignorés.
+  noms séparés par `;`), **glisser depuis l'explorateur** (le nom glissé
+  s'affiche sous la liste), ou clic droit → *Ajouter aux interactions*. Les
+  dépôts venus d'autres applications sont ignorés.
 * **Tableau des paires** à droite : `Molécule A` · `Molécule B` · `Niveau` ·
   `Mécanisme` · `Source` · `Détail`. Niveaux colorés ; tri par gravité
   (*Contre-indiqué* > *Majeur* > *Modéré* > *Mineur* > *Mentionné* >
@@ -436,7 +447,8 @@ prise.
   acceptée) ; l'effacement vide le journal et son fichier par défaut, après
   confirmation.
 * **Glisser-déposer** : déposer un dossier ou fichier de molécule de
-  l'explorateur sur le calendrier ouvre le dialogue pré-rempli.
+  l'explorateur sur le calendrier ouvre le dialogue pré-rempli (le nom glissé
+  s'affiche sous la grille pendant le geste).
 * **Statistiques…** (barre d'outils ou menu *Données*) : tableau **par
   molécule** — nombre de prises, première et dernière date, intervalle moyen,
   **dose cumulée** (doses chiffrables converties en mg) et **durée d'effet
@@ -456,6 +468,9 @@ molécule après une prise, à partir de sa dose et de son `resume.json`.
   `150 µg`, `1,5 g`, `100 mg`…), puis **Tracer**. Seul le premier nombre suivi
   de son unité sert d'échelle ; une dose non chiffrée donne une courbe
   normalisée (sommet à 1).
+* **Glisser-déposer** : déposer un dossier ou fichier de molécule de
+  l'explorateur n'importe où sur la page comble la molécule et trace sa courbe
+  (le nom glissé s'affiche dans la colonne de gauche pendant le geste).
 * **Modèle** : un compartiment, absorption puis élimination du premier ordre
   (fonction de Bateman). `ke = ln 2 / demi-vie` ; `ka` est résolu pour que le
   sommet tombe sur le **Tmax** documenté (fin de la montée `onset + come-up`).
