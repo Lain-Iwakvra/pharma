@@ -341,6 +341,12 @@ citant un métabolite) est remplacée par la ligne d'infobox, plus structurée.
   curseur, puis sous le tableau), et **glisser les lignes du
   tableau** pour les réordonner (le tri en cours est alors effacé, l'ordre
   manuel prime).
+* **Animation de déplacement** : pendant qu'une ligne est glissée, un **trait
+  d'insertion** marque l'endroit exact où elle se placera et le **nom de la
+  molécule** suit la chute, en pointillé ; au dépôt, la ligne **clignote une
+  fois** à sa nouvelle place. Le repère suit la moitié haute ou basse de la
+  ligne survolée (insertion avant ou après), n'apparaît pas pour un glisser
+  venu de l'explorateur, et s'efface seul si le geste est abandonné.
 * « Vider » ne supprime que le tableau : aucun dossier n'est touché.
 
 ### Page *Interactions*

@@ -50,12 +50,14 @@ from PySide6.QtCore import (
     QDate,
     QDateTime,
     QDir,
+    QEasingCurve,
     QEvent,
     QMarginsF,
     QMimeData,
     QObject,
     QPoint,
     QPointF,
+    QPropertyAnimation,
     QRectF,
     QRunnable,
     QSettings,
@@ -169,6 +171,93 @@ def dragged_molecule_name(mime: QMimeData) -> str:
         return bytes(mime.data(NAME_MIME)).decode("utf-8").strip()
     except UnicodeDecodeError:
         return ""
+
+
+class RowDropIndicator(QWidget):
+    """Repère de dépôt des lignes du tableau de comparaison.
+
+    Pendant qu'une ligne est glissée, un trait épais marque l'endroit exact
+    où elle sera insérée, et le nom de la molécule suit la chute en pointillé
+    (avec un léger décalage, comme un fantôme). Discret et lisible dans les
+    deux thèmes : la couleur vient de `theme_color`.
+
+    `set_position(y)` place le repère sur la ligne `y` du viewport du
+    tableau ; `None` (ou une table vide) le masque. Le widget recouvre tout
+    le viewport en transparence de souris : il ne capte aucun clic.
+    """
+
+    def __init__(self, table: QTableWidget, parent=None):
+        super().__init__(parent or table)
+        self._table = table
+        self._y: int | None = None
+        self._label = ""
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setVisible(False)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._finish)
+
+    def set_position(self, label: str, y: int) -> None:
+        """Affiche le repère à l'ordonnée `y` du viewport (coordonnées locales)."""
+        self._label = str(label or "")
+        self._y = int(y)
+        self.setGeometry(self._table.viewport().rect())
+        self._timer.stop()
+        self.setVisible(True)
+        # repaint immédiat : le repère doit coller au pointeur
+        self.update()
+
+    def finish(self) -> None:
+        """Le glisser est fini : le repère s'efface tout seul."""
+        self._timer.stop()
+        if not self.isVisible():
+            return
+        self._timer.start(220)
+
+    def clear(self) -> None:
+        """Efface le repère sans délai (curseur sorti de la table)."""
+        self._timer.stop()
+        self._y = None
+        self.setVisible(False)
+
+    def _finish(self) -> None:
+        self._y = None
+        self.setVisible(False)
+
+    # -- peinture ----------------------------------------------------------
+    def paintEvent(self, event) -> None:  # noqa: N802 - API Qt
+        y = self._y
+        if y is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        accent = theme_color("#1f6feb", "#7db8ff")
+        width = self.width()
+
+        ghost = QFont(self.font())
+        ghost.setBold(True)
+        painter.setFont(ghost)
+        metrics = painter.fontMetrics()
+        left = 6
+        rise = metrics.height() + 6
+        if self._label:
+            text_width = metrics.horizontalAdvance(self._label) + 20
+            painter.setBrush(QBrush(theme_color("#eaf2fd", "#243247")))
+            painter.setPen(QPen(accent, 1.0, Qt.DashLine))
+            painter.drawRoundedRect(
+                QRectF(left, y - rise, text_width, rise - 2), 5, 5)
+            painter.setPen(QPen(accent))
+            painter.drawText(
+                QRectF(left + 10, y - rise, text_width - 20, rise - 2),
+                Qt.AlignVCenter | Qt.AlignLeft, self._label)
+
+        # trait d'insertion : épaissi par la flèche de dépôt, bout arrondi
+        painter.setPen(QPen(accent, 2.0, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(4.0, float(y)), QPointF(width - 4.0, float(y)))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(accent))
+        painter.drawEllipse(QPointF(7.0, float(y)), 4.0, 4.0)
+        painter.drawEllipse(QPointF(width - 7.0, float(y)), 4.0, 4.0)
 
 
 class DropHint(QLabel):
@@ -2120,6 +2209,92 @@ class CompareTable(QTableWidget):
         self.setDragDropMode(QAbstractItemView.DragDrop)
         # libellé posé sous le tableau par le ComparePane (info du glisser)
         self.drop_hint: DropHint | None = None
+        # repère d'insertion dessiné par-dessus le tableau pendant le geste
+        self.row_indicator: RowDropIndicator | None = None
+        # animation du flash : une seule à la fois (demarrage avant la fin)
+        self._flash: QPropertyAnimation | None = None
+
+    # -- repere d'insertion ------------------------------------------------
+    def _has_row_mime(self, mime: QMimeData) -> bool:
+        return mime is not None and mime.hasFormat(self.ROW_MIME)
+
+    def _row_names(self, mime: QMimeData) -> str:
+        """« LSD, 2C-B » : nom des lignes transportées, lu dans le MIME.
+
+        Le texte du glisser porte les noms (rows transportés dans
+        `ROW_MIME`) ; le tableau les retrouve sans repasser par le disque.
+        """
+        names = [chunk.strip() for chunk in str(mime.text() or "").split(";")]
+        names = [name for name in names if name]
+        if len(names) > 2:
+            return ", ".join(names[:2]) + f" (+{len(names) - 2})"
+        return ", ".join(names)
+
+    def _drop_line_y(self, y: float) -> int:
+        """Ordonnée du repère pour une chute à `y` (centre de la ligne visée)."""
+        row = self.rowAt(int(y))
+        if row < 0:
+            # au-dessus de la première ligne ou sous la dernière :
+            # le repère suit le bord correspondant.
+            if self.rowCount() and y < self.visualRect(
+                    self.model().index(0, 0)).top():
+                return max(0, self.visualRect(
+                    self.model().index(0, 0)).top())
+            if self.rowCount():
+                last = self.visualRect(
+                    self.model().index(self.rowCount() - 1, 0))
+                return last.bottom()
+            return int(y)
+        rect = self.visualRect(self.model().index(row, 0))
+        middle = rect.top() + rect.height() / 2.0
+        return int(rect.top() if y <= middle else rect.bottom())
+
+    def _update_indicator(self, event) -> None:
+        """Positionne le repère d'insertion quand on glisse des lignes."""
+        if self.row_indicator is None or not self._has_row_mime(
+                event.mimeData()):
+            return
+        self.row_indicator.set_position(
+            self._row_names(event.mimeData()),
+            self._drop_line_y(float(event.position().y())),
+        )
+
+    # -- animation : la ligne deposee clignote une fois ---------------------
+    def flash_row(self, real_index: int) -> None:
+        """Clignote une ligne (indice dans la liste) après un dépôt.
+
+        L'animation fait osciller la hauteur de la ligne : l'oeil repère
+        où la molécule a atterri. Sans anicroche si la ligne n'est pas
+        affichée (filtre) ou si le tableau a été reconstruit entre-temps.
+        """
+        visual = -1
+        for r in range(self.rowCount()):
+            item = self.item(r, 0)
+            stored = item.data(Qt.UserRole + 1) if item is not None else None
+            if stored is not None and int(stored) == int(real_index):
+                visual = r
+                break
+        if visual < 0:
+            return
+        if self._flash is not None:
+            self._flash.stop()
+            self._reset_flash_rows()
+        start = float(self.rowHeight(visual))
+        end = start + 12.0
+        animation = QPropertyAnimation(self, b"rowHeight", self)
+        animation.setDuration(70)
+        animation.setStartValue(start)
+        animation.setKeyValueAt(0.5, end)
+        animation.setEndValue(start)
+        animation.setEasingCurve(QEasingCurve.InOutQuad)
+        animation.finished.connect(self._reset_flash_rows)
+        self._flash = animation
+        animation.start(QPropertyAnimation.DeleteWhenStopped)
+
+    def _reset_flash_rows(self) -> None:
+        """Repose toutes les hauteurs par défaut après le flash."""
+        self._flash = None
+        self.resizeRowsToContents()
 
     # -- glisser-deposer --------------------------------------------------
     @staticmethod
@@ -2131,6 +2306,7 @@ class CompareTable(QTableWidget):
     def dragEnterEvent(self, event) -> None:  # noqa: N802 - API Qt
         if self._has_our_mime(event.mimeData()):
             self._hint_show(event.mimeData())
+            self._update_indicator(event)
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -2138,12 +2314,15 @@ class CompareTable(QTableWidget):
     def dragMoveEvent(self, event) -> None:  # noqa: N802 - API Qt
         if self._has_our_mime(event.mimeData()):
             self._hint_show(event.mimeData())
+            self._update_indicator(event)
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragLeaveEvent(self, event) -> None:  # noqa: N802 - API Qt
         self._hint_reset()
+        if self.row_indicator is not None:
+            self.row_indicator.clear()
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event) -> None:  # noqa: N802 - API Qt
@@ -2171,6 +2350,9 @@ class CompareTable(QTableWidget):
                 event.ignore()
         else:
             event.ignore()
+        # le repere s'efface apres la bascule (le nouveau dessin a pris sa place)
+        if self.row_indicator is not None:
+            self.row_indicator.finish()
 
     def _hint_show(self, mime: QMimeData) -> None:
         """Nom de la molécule glissée, sous le tableau (libellé d'aide)."""
@@ -2203,9 +2385,26 @@ class CompareTable(QTableWidget):
         mime.setData(
             self.ROW_MIME, ",".join(str(i) for i in idxs).encode("utf-8")
         )
+        # le repère d'insertion affiche le nom des molécules transportées
+        names = [self.item(self.table_index(i), 0).text()
+                 for i in idxs if self.table_index(i) >= 0]
+        mime.setText("; ".join(names))
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.exec(Qt.MoveAction)
+        # geste terminé (déposé, annulé ou relâché hors de la table) : le
+        # repère s'efface de lui-même.
+        if self.row_indicator is not None:
+            self.row_indicator.finish()
+
+    def table_index(self, real_index: int) -> int:
+        """Ligne affichée portant l'indice `real_index` de la liste (-1 sinon)."""
+        for r in range(self.rowCount()):
+            item = self.item(r, 0)
+            stored = item.data(Qt.UserRole + 1) if item is not None else None
+            if stored is not None and int(stored) == int(real_index):
+                return r
+        return -1
 
     # -- clavier ----------------------------------------------------------
     def keyPressEvent(self, event) -> None:  # noqa: N802 - API Qt
@@ -2371,6 +2570,10 @@ class ComparePane(QWidget):
         )
         self.table.drop_hint = self.hint
         layout.addWidget(self.hint)
+
+        # repère de dépôt des lignes : dessiné par-dessus le tableau pendant
+        # un glisser de ligne, pour montrer l'endroit exact de l'insertion.
+        self.table.row_indicator = RowDropIndicator(self.table, self.table)
 
         self.show_rows([])
 
@@ -2570,6 +2773,9 @@ class ComparePane(QWidget):
         self.table.setSortingEnabled(False)
         self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
         self.show_rows(new_rows)
+        # animation : la ligne deposee clignote a sa nouvelle place
+        if moved:
+            self.table.flash_row(moved[0])
         self.rowsChanged.emit()
 
     def selected_names(self) -> list[str]:
